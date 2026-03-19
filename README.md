@@ -10,63 +10,45 @@ At the same time, research shows gig workers have low insurance penetration, lim
 Chosen Persona:
 Urban food and quick‑commerce delivery rider working with platforms like Swiggy, Zomato, Blinkit, or Zepto in Tier‑1/Tier‑2 Indian cities.
 
-Key characteristics:
+### Key characteristics:
 
-Works 6–7 days a week, often 8–10 hours per day during peak slots (lunch/dinner or evening quick‑commerce rush).
+- Works 6–7 days a week, often 8–10 hours per day during peak slots (lunch/dinner or evening quick‑commerce rush).
+- Earnings are tied to number of orders completed, surge incentives, and tips, with high variability across days and seasons.
+- Typically uses an Android smartphone, depends on navigation apps and platform apps, and receives payouts on a weekly cycle.
+- Bears most operational risk (fuel, vehicle upkeep, demand fluctuation) without employer‑style benefits or guaranteed minimum earnings.
 
-Earnings are tied to number of orders completed, surge incentives, and tips, with high variability across days and seasons.
+### Representative scenarios (income‑loss due to external disruptions):
 
-Typically uses an Android smartphone, depends on navigation apps and platform apps, and receives payouts on a weekly cycle.
-​
-
-Bears most operational risk (fuel, vehicle upkeep, demand fluctuation) without employer‑style benefits or guaranteed minimum earnings.
-
-Representative scenarios (income‑loss due to external disruptions):
-
-Heavy rain & flooding: Entire afternoon/evening shifts disrupted as roads become unsafe or restaurants temporarily stop accepting orders in certain zones, reducing completed orders and earnings.
-
-Extreme heat or poor air quality: Riders avoid long outdoor shifts during 42°C+ heat waves or AQI ≥ 300 days for health reasons, leading to lost working hours and lower income.
-​
-
-Curfews and local strikes: Sudden Section‑144, market closures, or law‑and‑order issues shut down specific neighborhoods, blocking access to pick‑up/drop locations.
-​
-
-Platform/app outages: Prolonged app downtime or payment gateway failures stop new order assignment, leaving riders idle during what would normally be high‑earning slots.
-​
+- **Heavy rain & flooding:** Entire afternoon/evening shifts disrupted as roads become unsafe or restaurants temporarily stop accepting orders in certain zones, reducing completed orders and earnings.
+- **Extreme heat or poor air quality:** Riders avoid long outdoor shifts during 42°C+ heat waves or AQI ≥ 300 days for health reasons, leading to lost working hours and lower income.
+- **Curfews and local strikes:** Sudden Section‑144, market closures, or law‑and‑order issues shut down specific neighborhoods, blocking access to pick‑up/drop locations.
+- **Platform/app outages:** Prolonged app downtime or payment gateway failures stop new order assignment, leaving riders idle during what would normally be high‑earning slots.
 
 In all these cases, riders lose earnings even though they did nothing wrong and often were ready to work.
 
 ## 3. Solution Concept
 We propose “SurakshaRide” – an AI‑enabled parametric income protection mobile app that offers weekly income‑loss cover to food and quick‑commerce delivery partners. The product automatically monitors external disruption parameters (weather, pollution, curfew, platform outages) and triggers instant, rule‑based payouts when these conditions cause measurable loss of income, without requiring riders to file traditional claims.
-​
-​
 
-Core principles:
+### Core principles:
 
-Coverage scope: Only loss of income due to external disruptions; no health, life, accident, or vehicle repairs, strictly following the challenge constraints.
-​
+- **Coverage scope:** Only loss of income due to external disruptions; no health, life, accident, or vehicle repairs, strictly following the challenge constraints.
 
-Weekly pricing: Premiums and coverage are structured on a weekly basis, matching typical payout cycles and making protection more affordable and flexible.
-​
-​
+- **Weekly pricing:** Premiums and coverage are structured on a weekly basis, matching typical payout cycles and making protection more affordable and flexible.
 
-Parametric automation: Predefined external indices (rainfall, temperature, AQI, curfew, platform incidents) act as triggers; once conditions are met and income loss is detected, payouts are auto‑initiated.
-​
-​
+- **Parametric automation:** Predefined external indices (rainfall, temperature, AQI, curfew, platform incidents) act as triggers; once conditions are met and income loss is detected, payouts are auto‑initiated.
 
-AI‑driven intelligence: Machine learning models power weekly risk‑based pricing, expected earnings estimation, and fraud detection, enabling fairer premiums and low‑friction claims.
+- **AI‑driven intelligence:** Machine learning models power weekly risk‑based pricing, expected earnings estimation, and fraud detection, enabling fairer premiums and low‑friction claims.
 
 ## 4. Parametric Triggers and Disruption Parameters
 We design a set of clear, measurable parametric triggers tailored to delivery partners:
 
 ### 4.1 External indices
+
 Weather (Rain & Heat):
 
 Source: Public weather APIs (e.g., IMD, OpenWeather – mocked for prototype).
 ​
-​
-
-Triggers (examples):
+​Triggers (examples):
 
 Daily rainfall in worker’s primary pin code ≥ 50 mm in the last 24 hours.
 
@@ -327,14 +309,14 @@ Payment gateway sandbox (Razorpay test mode / Stripe sandbox / UPI simulator).
 ### 8.2 High‑level architecture
 Mobile app ↔ API Gateway ↔ Microservices:
 
-Policy Service (onboarding, plan selection, weekly renewals).
+- Policy Service (onboarding, plan selection, weekly renewals).
 
-Risk & Pricing Service (uses ML risk model).
+- Risk & Pricing Service (uses ML risk model).
 
-Claims & Payout Service (trigger processing, earnings comparison, payout computation).
+- Claims & Payout Service (trigger processing, earnings comparison, payout computation).
 
-Fraud Detection Service (anomaly scoring).
+- Fraud Detection Service (anomaly scoring).
 
-Integration Service (weather, AQI, platform, payments).
+- Integration Service (weather, AQI, platform, payments).
 
 Admin dashboard (web) connected to same backend for analytics and configurations.

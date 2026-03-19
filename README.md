@@ -1,388 +1,144 @@
 # SurakshaRide
 
-1. Problem Overview
-India’s food and quick‑commerce delivery partners (Zomato, Swiggy, Blinkit, Zepto, etc.) form a critical backbone of urban life, ensuring timely delivery of meals and essentials. However, their earnings are highly vulnerable to external disruptions such as extreme weather, pollution, curfews, local strikes, and platform outages that they cannot control. These events can reduce their working hours or order volume, causing 20–30% drops in monthly income in bad periods, while existing insurance products focus on health, life, or vehicle damage rather than short‑term income loss.
-​
+SurakshaRide is an AI-enabled parametric income protection mobile app that offers weekly income-loss cover to food and quick-commerce delivery partners.
 
-At the same time, research shows gig workers have low insurance penetration, limited savings buffers, and little access to formal social protection, leaving them exposed to income shocks despite high contribution to the digital economy. Traditional indemnity insurance with complex claims processes, annual premiums, and manual documentation does not match their weekly cash‑flow reality or the need for fast, transparent payouts. There is a clear gap for a simple, digital‑first weekly income protection product tailored to their risk profile.
-​
+## 1. Problem Overview
 
-2. Persona: Urban Delivery Rider
-Chosen Persona:
-Urban food and quick‑commerce delivery rider working with platforms like Swiggy, Zomato, Blinkit, or Zepto in Tier‑1/Tier‑2 Indian cities.
+India’s food and quick-commerce delivery partners are vulnerable to income loss from external disruptions like extreme weather, pollution, curfews, and platform outages. These events can cause a 20–30% drop in monthly income. Existing insurance products do not cover short-term income loss, and traditional insurance is not suitable for gig workers' needs.
 
-Key characteristics:
+## 2. Persona: Urban Delivery Rider
 
-Works 6–7 days a week, often 8–10 hours per day during peak slots (lunch/dinner or evening quick‑commerce rush).
+Our chosen persona is an urban food and quick-commerce delivery rider in India.
 
-Earnings are tied to number of orders completed, surge incentives, and tips, with high variability across days and seasons.
+### Key Characteristics
 
-Typically uses an Android smartphone, depends on navigation apps and platform apps, and receives payouts on a weekly cycle.
-​
+*   Works 6–7 days a week, 8–10 hours daily.
+*   Earnings are variable and tied to order volume.
+*   Uses an Android smartphone for work.
+*   Bears most operational risks (fuel, vehicle upkeep).
 
-Bears most operational risk (fuel, vehicle upkeep, demand fluctuation) without employer‑style benefits or guaranteed minimum earnings.
+### Income-Loss Scenarios
 
-Representative scenarios (income‑loss due to external disruptions):
+*   **Heavy Rain & Flooding:** Disrupts shifts and reduces orders.
+*   **Extreme Heat or Poor Air Quality:** Riders avoid long shifts, leading to lost income.
+*   **Curfews and Local Strikes:** Block access to delivery zones.
+*   **Platform/App Outages:** Leave riders idle during peak hours.
 
-Heavy rain & flooding: Entire afternoon/evening shifts disrupted as roads become unsafe or restaurants temporarily stop accepting orders in certain zones, reducing completed orders and earnings.
+## 3. Solution Concept
 
-Extreme heat or poor air quality: Riders avoid long outdoor shifts during 42°C+ heat waves or AQI ≥ 300 days for health reasons, leading to lost working hours and lower income.
-​
+We propose **SurakshaRide**, an AI-enabled mobile app for weekly income protection. It monitors external disruptions and triggers instant, rule-based payouts without requiring manual claims.
 
-Curfews and local strikes: Sudden Section‑144, market closures, or law‑and‑order issues shut down specific neighborhoods, blocking access to pick‑up/drop locations.
-​
+### Core Principles
 
-Platform/app outages: Prolonged app downtime or payment gateway failures stop new order assignment, leaving riders idle during what would normally be high‑earning slots.
-​
+*   **Coverage Scope:** Only income loss due to external disruptions.
+*   **Weekly Pricing:** Affordable and flexible weekly premiums and coverage.
+*   **Parametric Automation:** Payouts are auto-initiated based on predefined triggers.
+*   **AI-Driven Intelligence:** ML models for risk-based pricing, earnings estimation, and fraud detection.
 
-In all these cases, riders lose earnings even though they did nothing wrong and often were ready to work.
+## 4. Parametric Triggers and Disruption Parameters
 
-3. Solution Concept
-We propose “SurakshaRide” – an AI‑enabled parametric income protection mobile app that offers weekly income‑loss cover to food and quick‑commerce delivery partners. The product automatically monitors external disruption parameters (weather, pollution, curfew, platform outages) and triggers instant, rule‑based payouts when these conditions cause measurable loss of income, without requiring riders to file traditional claims.
-​
-​
+### 4.1. External Indices
 
-Core principles:
+*   **Weather (Rain & Heat):**
+    *   Source: Public weather APIs (e.g., IMD, OpenWeather).
+    *   Triggers: Daily rainfall ≥ 50 mm, or temperature ≥ 42°C for ≥ 3 hours.
+*   **Air Quality:**
+    *   Source: AQI APIs.
+    *   Trigger: AQI ≥ 300 for ≥ 4 hours.
+*   **Social/Regulatory Events:**
+    *   Source: Simulated official notifications.
+    *   Triggers: Government-declared curfews or registered strikes.
+*   **Platform/Infra Disruptions:**
+    *   Source: Simulated platform status API.
+    *   Triggers: App unavailability or payment gateway outages.
 
-Coverage scope: Only loss of income due to external disruptions; no health, life, accident, or vehicle repairs, strictly following the challenge constraints.
-​
+### 4.2. Earnings Impact Logic
 
-Weekly pricing: Premiums and coverage are structured on a weekly basis, matching typical payout cycles and making protection more affordable and flexible.
-​
-​
+When a trigger occurs, the system checks if the rider was on-duty and if their expected earnings significantly exceed actual earnings. If so, it calculates the income loss and initiates a payout.
 
-Parametric automation: Predefined external indices (rainfall, temperature, AQI, curfew, platform incidents) act as triggers; once conditions are met and income loss is detected, payouts are auto‑initiated.
-​
-​
+## 5. Weekly Premium and Financial Model
 
-AI‑driven intelligence: Machine learning models power weekly risk‑based pricing, expected earnings estimation, and fraud detection, enabling fairer premiums and low‑friction claims.
+### 5.1. Product Structure
 
-4. Parametric Triggers and Disruption Parameters
-We design a set of clear, measurable parametric triggers tailored to delivery partners:
+We offer simple weekly plans with different coverage amounts:
 
-4.1 External indices
-Weather (Rain & Heat):
+*   **Plan S:** Cover up to ₹2,000/week.
+*   **Plan M:** Cover up to ₹3,500/week.
+*   **Plan L:** Cover up to ₹5,000/week.
 
-Source: Public weather APIs (e.g., IMD, OpenWeather – mocked for prototype).
-​
-​
+### 5.2. High-Level Premium Formula
 
-Triggers (examples):
+A base premium is set by city and plan, then adjusted by a risk score `R` from our AI model:
 
-Daily rainfall in worker’s primary pin code ≥ 50 mm in the last 24 hours.
+`Weekly Premium = Base Premium × (1 + 0.5 × R)`
 
-Maximum temperature ≥ 42°C for ≥ 3 continuous hours.
+### 5.3. Payout Calculation
 
-Air Quality:
+For each disruption window `W`:
 
-Source: AQI APIs (or mocks).
+*   **Expected Earnings (E_W):** Predicted by an ML model.
+*   **Actual Earnings (A_W):** Fetched from platform logs.
+*   **Income Loss (L_W):** `max(0, E_W - A_W)`, capped at plan limits.
 
-Trigger: AQI ≥ 300 (“Very Poor/Severe”) in worker’s zone for ≥ 4 hours.
-​
+### 5.4. Funding Enhancements (Optional)
 
-Social/Regulatory Events:
+*   Micro-top-ups from tips.
+*   Platform co-contributions during high-risk seasons.
 
-Source: Simulated feeds of official curfew notifications / market closures (text feed or admin inputs in prototype).
-​
+## 6. AI/ML Integration Plan
 
-Triggers:
+### 6.1. Dynamic Risk & Pricing Model
 
-Government/authority‑declared curfew in ward/zone overlapping rider’s working area.
+*   **Objective:** Predict weekly disruption risk to adjust premiums.
+*   **Model:** Gradient boosting model to output a risk score.
 
-Registered city‑wide strike or protest causing closure of markets/zones.
+### 6.2. Expected Earnings Model
 
-Platform / Infra Disruptions:
+*   **Objective:** Estimate what a rider would have earned without disruptions.
+*   **Model:** Regression model (e.g., XGBoost, Random Forest) to predict earnings.
 
-Source: Simulated platform status API or internal service that flags downtime.
+### 6.3. Fraud Detection
 
-Triggers:
+*   **Objective:** Detect suspicious claims to reduce leakage.
+*   **Techniques:** Anomaly detection and rule-based gating.
 
-Food delivery app unavailability in city for ≥ 30 minutes during peak slot.
+### 6.4. Personalization and UX Intelligence
 
-Payment gateway outage blocking order completion for ≥ X minutes.
-​
-
-4.2 Earnings impact logic
-Once a trigger occurs, the system checks:
-
-Was the rider on‑duty (status “online” with the platform or within geofenced working zone) during the disruption window?
-
-What is the expected earnings for that rider in that time window vs actual earnings?
-
-If expected earnings significantly exceed actual earnings and the difference is attributable to a disruption trigger, the system calculates income loss and initiates a payout within the weekly coverage cap.
-​
-
-5. Weekly Premium and Financial Model
-5.1 Product structure
-We offer simple weekly plans, each with a maximum weekly income‑loss coverage amount:
-
-Plan S: Cover up to ₹2,000/week of income loss.
-
-Plan M: Cover up to ₹3,500/week.
-
-Plan L: Cover up to ₹5,000/week.
-
-Premiums are paid weekly, deducted via UPI/autopay or as simulated deductions from platform payouts in the prototype.
-​
-​
-
-5.2 High‑level premium formula
-For each rider, a base premium is set by city and plan:
-
-Example (illustrative):
-
-Tier‑1 city – Plan M base premium = ₹70/week.
+*   Use clustering to recommend suitable plans.
+*   Notify riders of high-risk weeks.
 
-Tier‑2/3 city – Plan M base premium = ₹55/week.
+## 7. Mobile App – User Workflow
 
-We then apply a risk score 
-R
-∈
-[
-0
-,
-1
-]
-R∈[0,1] generated by our AI risk model (see Section 6.1):
+### 7.1. Rider Journey
 
-Weekly Premium = Base Premium × (1 + 0.5 × R)
+1.  **Onboarding & KYC:** Sign up, basic KYC, and link delivery platform account.
+2.  **Choose Weekly Plan:** Select a plan (S/M/L) and set up payment.
+3.  **Background Monitoring:** The system continuously monitors for disruptions.
+4.  **Auto Claim & Payout:** The app notifies the rider of automatic payouts.
+5.  **History & Insights:** A dashboard shows earnings, payouts, and risk alerts.
 
-Examples:
+### 7.2. Admin/Insurer View
 
-Low‑risk rider (R = 0.2): multiplier = 1.1 → premium ≈ ₹77/week (Tier‑1, Plan M).
+*   Monitor portfolio, risk, and loss ratios.
+*   Configure triggers and adjust underwriting strategies.
 
-High‑risk rider (R = 0.8): multiplier = 1.4 → premium ≈ ₹98/week (Tier‑1, Plan M).
+## 8. Tech Stack and Architecture
 
-This makes pricing sensitive to local disruption risk and seasonality while remaining interpretable.
+### 8.1. Proposed Tech Stack
 
-5.3 Payout calculation
-For each disruption window 
-W
-W:
+*   **Mobile App:** Flutter / React Native or native Android (Kotlin).
+*   **Backend:** Node.js / Java Spring Boot / Python FastAPI.
+*   **Database:** PostgreSQL and Redis.
+*   **AI/ML:** Python (scikit-learn, XGBoost, PyTorch).
+*   **Integrations (mocked):** Weather APIs, platform APIs, payment gateway sandbox.
 
-Expected earnings 
-E
-W
-E 
-W
- :
-Predicted by an ML model using historical data for that rider: weekday, time band, weather season, festival flags, and zone‑level demand patterns.
+### 8.2. High-Level Architecture
 
-Actual earnings 
-A
-W
-A 
-W
- :
-Fetched from platform or simulated order logs for that window.
+A microservices architecture with:
 
-Income loss 
-L
-W
-L 
-W
- :
-L
-W
-=
-max
-⁡
-(
-0
-,
-E
-W
-−
-A
-W
-)
-L 
-W
- =max(0,E 
-W
- −A 
-W
- ) capped at per‑event and per‑week limits.
-
-Total weekly payout = sum of all 
-L
-W
-L 
-W
-  during the week, capped at the rider’s chosen plan limit (e.g., ₹3,500 for Plan M).
-
-5.4 Funding enhancements (optional idea)
-We can optionally allow:
-
-Micro‑top‑ups from tips or per order (e.g., ₹1 per order goes into a “Protection Wallet”), inspired by tip‑funded micro‑insurance models.
-​
-
-Platform co‑contributions during high‑risk seasons (e.g., monsoon), where platforms add a small amount per order to encourage adoption.
-​
-
-6. AI/ML Integration Plan
-6.1 Dynamic risk & pricing model
-Objective: Predict weekly disruption risk and adjust premiums fairly.
-
-Inputs:
-
-City, micro‑zone, and geohash of primary working area.
-
-Historical weather and AQI data for that zone.
-
-Rider’s historical active hours distribution and typical order density.
-
-Season and month (monsoon, winter pollution peaks, festive rush).
-
-Model:
-
-Gradient boosting or similar model trained on historical (or simulated) data to output a risk score for likely income‑loss events in the upcoming week.
-
-Risk score drives the multiplier in the premium formula (Section 5.2).
-
-6.2 Expected earnings model (for loss estimation)
-Objective: Estimate “what the rider would have earned” absent disruptions.
-
-Inputs:
-
-Historical earnings per time slot per rider.
-
-Features: weekday, time of day, weather forecasts, holiday/festival flags, surge indicators, and platform demand signals (past orders per slot).
-
-Model:
-
-Regression model (e.g., XGBoost/Random Forest/Neural Net) predicting expected earnings per slot.
-
-During actual week, we compare predicted vs realised earnings to quantify income loss due to disruption.
-
-6.3 Fraud detection
-Objective: Detect suspicious claims and reduce leakage while keeping UX simple.
-
-Signals:
-
-Claims frequency vs peer riders in the same zone and plan.
-
-Discrepancies between app GPS and platform location logs.
-
-Claims in time/location windows where no triggers fired.
-
-Unusual patterns (e.g., rider always “on‑duty” only during high payout windows).
-​
-
-Techniques:
-
-Unsupervised anomaly detection (Isolation Forest, clustering‑based anomaly scores) on claim and behaviour data.
-​
-
-Simple supervised classifier for “high‑risk vs low‑risk claim” once we have labelled/simulated examples.
-
-Rule‑based gating for extreme cases (e.g., claims from locations thousands of km away from registered city).
-
-Low‑risk claims remain fully automated; high‑risk ones are flagged in the admin dashboard for manual review.
-
-6.4 Personalisation and UX intelligence
-We can also use clustering/segmentation to:
-
-Identify full‑time vs part‑time riders and recommend suitable plan sizes.
-
-Notify riders before high‑risk weeks (“Monsoon peak ahead – disruption probability high; your current cover is ₹2,000/week, consider upgrading.”).
-
-7. Mobile App – User Workflow
-Platform: Android mobile app (primary) with backend services and admin dashboard.
-​
-
-7.1 Rider journey
-Onboarding & KYC
-
-Sign up with mobile number + OTP.
-
-Basic KYC (name, ID type, city) and link to delivery platform account (simulated integration in prototype).
-
-Collect consent for using location and earnings data for risk scoring and payouts.
-
-Choose weekly plan
-
-App shows recommended plan based on typical earnings (S/M/L).
-
-Display weekly premium and maximum weekly protection clearly.
-
-Payment setup (UPI/Wallet/autodebit – sandbox).
-
-Background monitoring
-
-System continuously monitors:
-
-Weather and AQI in rider’s working zone.
-
-Platform status/outage events (simulated).
-
-Curfew/strike feeds (simulated).
-
-No user action needed during normal operations.
-
-Auto claim & payout
-
-When a trigger fires and income loss is detected, the app:
-
-Notifies the rider: “Heavy rain caused loss of ₹X today. You will receive a payout of ₹Y under SurakshaRide.”
-
-Shows payout details and updated weekly balance (remaining coverage).
-
-History & insights
-
-Rider dashboard:
-
-Weekly earnings vs protected earnings.
-
-Past disruption events and payouts.
-
-Coverage status and upcoming risk alerts.
-
-7.2 Admin/Insurer view (Phase 2–3)
-Monitor policy portfolio, risk and loss ratios by city/zone, high‑risk upcoming weeks, and fraud alerts.
-​
-
-Configure parametric thresholds, simulate impact of new triggers, and adjust underwriting strategies.
-
-8. Tech Stack and Architecture
-8.1 Proposed tech stack
-Mobile App:
-
-Flutter / React Native (cross‑platform) or native Android (Kotlin).
-
-Backend:
-
-Node.js / Java Spring Boot / Python FastAPI for REST APIs and business logic.
-
-Database:
-
-PostgreSQL for transactional data (policies, payouts), Redis for caching.
-
-AI/ML:
-
-Python (scikit‑learn, XGBoost, or simple PyTorch) – models served via REST microservice.
-
-External Integrations (mocked for prototype):
-
-Weather & AQI APIs (free tier/mock).
-
-Platform APIs (simulated for online/offline status, earnings, orders).
-​
-
-Payment gateway sandbox (Razorpay test mode / Stripe sandbox / UPI simulator).
-​
-
-8.2 High‑level architecture
-Mobile app ↔ API Gateway ↔ Microservices:
-
-Policy Service (onboarding, plan selection, weekly renewals).
-
-Risk & Pricing Service (uses ML risk model).
-
-Claims & Payout Service (trigger processing, earnings comparison, payout computation).
-
-Fraud Detection Service (anomaly scoring).
-
-Integration Service (weather, AQI, platform, payments).
-
-Admin dashboard (web) connected to same backend for analytics and configurations.
+*   Policy Service
+*   Risk & Pricing Service
+*   Claims & Payout Service
+*   Fraud Detection Service
+*   Integration Service
+*   Admin Dashboard

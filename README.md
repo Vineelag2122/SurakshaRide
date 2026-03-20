@@ -165,12 +165,12 @@ Weekly Premium = Base Premium × (1 + 0.5 × Risk Score)
 
 ## 13. Use Cases
 
-1. Heavy Rain Day
+ 1. Heavy Rain Day
 
 - Ravi, a Swiggy delivery partner, starts his evening shift as usual. Suddenly, heavy rain begins and continues for several hours. Due to waterlogging and safety concerns, orders reduce and he cannot complete many deliveries. Even though he was ready to work, his earnings drop significantly.
 - SurakshaRide detects the heavy rain and automatically compensates Ravi for his lost income.
 
-2.Extreme Heat 
+ 2.Extreme Heat 
 
 - Amit, a delivery rider, usually works full day shifts. However, during a severe heatwave and high pollution day, he reduces his working hours to avoid health risks. As a result, his income for that day decreases.
 - SurakshaRide identifies the extreme conditions and provides a payout for the income he missed.

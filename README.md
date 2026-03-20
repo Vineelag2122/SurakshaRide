@@ -36,6 +36,8 @@ SurakshaRide is a weekly, AI-powered parametric income protection platform that 
 
 It provides weekly income-loss coverage triggered automatically based on real-world conditions, ensuring fast and transparent payouts.
 
+Simulated platform outage signals are used in prototype
+
 ### Core Principles
 
 - Focused Coverage: Only income loss due to external disruptions  
@@ -64,7 +66,7 @@ It provides weekly income-loss coverage triggered automatically based on real-wo
 For each disruption window:
 
 - Expected Earnings (E): Predicted using AI models  
-- Actual Earnings (A): From platform data  
+- Actual Earnings (A): Actual earnings are simulated or user-input based in the prototype
 - Loss (L) = max(0, E − A)  
 
 Payout is automatically calculated and credited, subject to weekly limits.
@@ -116,7 +118,12 @@ Weekly Premium = Base Premium × (1 + 0.5 × Risk Score)
 ### Fraud Detection
 
 - Detects anomalies using behavior and location data  
-- Flags suspicious cases for review  
+- Flags suspicious cases for review
+- For prototype:
+	•	GPS check
+	•	Rule-based anomaly
+	•	Simple scoring
+
 
 ## 9. System Architecture
 

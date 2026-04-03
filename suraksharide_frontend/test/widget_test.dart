@@ -8,23 +8,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:suraksharide_frontend/main.dart';
+import 'package:suraksharide_frontend/suraksharide_app.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('SurakshaRide launches and allows demo rider login', (WidgetTester tester) async {
+    await tester.pumpWidget(const SurakshaRideApp());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    expect(find.text('SurakshaRide'), findsWidgets);
+    expect(find.textContaining('parametric income protection'), findsOneWidget);
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    await tester.enterText(find.byType(TextField).at(0), 'rider@demo.com');
+    await tester.enterText(find.byType(TextField).at(1), 'demo123');
+    await tester.ensureVisible(find.text('Continue'));
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    expect(find.text('Rider Console'), findsOneWidget);
+    expect(find.text('Coverage cap'), findsOneWidget);
   });
 }

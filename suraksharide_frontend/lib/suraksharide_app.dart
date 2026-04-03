@@ -1,61 +1,590 @@
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path;
+import 'package:sqflite/sqflite.dart' as sqflite;
+import 'package:sqflite_common_ffi/sqflite_ffi.dart' as sqflite_ffi;
 
 enum UserRole { rider, admin }
 enum PlanId { s, m, l }
 enum Severity { low, medium, high }
+enum AuthMode { login, register }
 
-extension on PlanId {
-  String get name {
-    switch (this) {
-      case PlanId.s:
-        return 'S';
-      case PlanId.m:
-        return 'M';
-      case PlanId.l:
-        return 'L';
+class AuthAccount {
+  final String password;
+  final UserRole role;
+
+  const AuthAccount({required this.password, required this.role});
+}
+
+class AuthActionResult {
+  final bool success;
+  final String message;
+
+  const AuthActionResult({required this.success, required this.message});
+}
+
+class AppDatabase {
+  static final AppDatabase instance = AppDatabase._internal();
+  static const String dbName = 'suraksharide.db';
+
+  static const String tableUsers = 'users';
+  static const String tablePolicies = 'policies';
+  static const String tableSelectedPolicies = 'selected_policies';
+  static const String tablePayments = 'payments';
+  static const String tablePayouts = 'payouts';
+  static const String tableAlerts = 'alerts';
+
+  AppDatabase._internal();
+
+  final bool _useMemoryStore = kIsWeb;
+
+  sqflite.Database? _database;
+  final Map<String, Map<String, Object?>> _usersMemory = {};
+  final Map<String, Map<String, Object?>> _policiesMemory = {};
+  final List<Map<String, Object?>> _selectedPoliciesMemory = [];
+  final List<Map<String, Object?>> _paymentsMemory = [];
+  int _selectedPolicyAutoId = 0;
+  int _paymentAutoId = 0;
+
+  Future<sqflite.Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _openDatabase();
+    return _database!;
+  }
+
+  Future<sqflite.Database> _openDatabase() async {
+    Future<void> onOpenWithForeignKeys(sqflite.Database db) async {
+      if (!kIsWeb) {
+        await db.execute('PRAGMA foreign_keys = ON');
+      }
+    }
+
+    Future<sqflite.Database> openWithFfiFactory() async {
+      sqflite_ffi.sqfliteFfiInit();
+      sqflite.databaseFactory = sqflite_ffi.databaseFactoryFfi;
+      final dbPath = await sqflite_ffi.databaseFactoryFfi.getDatabasesPath();
+      final fullPath = path.join(dbPath, dbName);
+      return sqflite_ffi.databaseFactoryFfi.openDatabase(
+        fullPath,
+        options: sqflite.OpenDatabaseOptions(
+          version: 1,
+          onCreate: _onCreate,
+          onOpen: onOpenWithForeignKeys,
+        ),
+      );
+    }
+
+    final isDesktop = !kIsWeb && {
+      TargetPlatform.windows,
+      TargetPlatform.linux,
+      TargetPlatform.macOS,
+    }.contains(defaultTargetPlatform);
+
+    if (kIsWeb) {
+      throw UnsupportedError('SQLite is disabled on web in this build. Use memory store.');
+    }
+
+    if (isDesktop) {
+      return openWithFfiFactory();
+    }
+
+    try {
+      final dbPath = await sqflite.getDatabasesPath();
+      final fullPath = path.join(dbPath, dbName);
+      return sqflite.openDatabase(
+        fullPath,
+        version: 1,
+        onCreate: _onCreate,
+        onOpen: onOpenWithForeignKeys,
+      );
+    } on StateError catch (error) {
+      // Some desktop runs can still hit the global factory error path.
+      if (error.toString().contains('databaseFactory not initialized')) {
+        return openWithFfiFactory();
+      }
+      rethrow;
     }
   }
 
-  int get weeklyCoverage {
-    switch (this) {
-      case PlanId.s:
-        return 2000;
-      case PlanId.m:
-        return 3500;
-      case PlanId.l:
-        return 5000;
+  Future<void> init() async {
+    if (_useMemoryStore) {
+      _seedDefaultsMemory();
+      return;
+    }
+
+    final db = await database;
+    await _seedDefaults(db);
+  }
+
+  void _seedDefaultsMemory() {
+    final now = DateTime.now().toIso8601String();
+
+    _usersMemory['rider@demo.com'] = {
+      'email': 'rider@demo.com',
+      'password': 'demo123',
+      'role': UserRole.rider.name,
+      'created_at': now,
+    };
+
+    _usersMemory['admin@demo.com'] = {
+      'email': 'admin@demo.com',
+      'password': 'demo123',
+      'role': UserRole.admin.name,
+      'created_at': now,
+    };
+
+    final policies = [
+      {
+        'id': 'policy_basic',
+        'name': 'Basic Coverage',
+        'description': 'Essential protection for daily commute',
+        'premium_monthly': 299.0,
+        'coverage_amount': 50000,
+        'type': 'basic',
+        'is_active': 1,
+        'created_at': now,
+      },
+      {
+        'id': 'policy_premium',
+        'name': 'Premium Plus',
+        'description': 'Complete coverage with enhanced benefits',
+        'premium_monthly': 599.0,
+        'coverage_amount': 100000,
+        'type': 'premium',
+        'is_active': 1,
+        'created_at': now,
+      },
+      {
+        'id': 'policy_comprehensive',
+        'name': 'Comprehensive Shield',
+        'description': 'Maximum protection with all benefits',
+        'premium_monthly': 999.0,
+        'coverage_amount': 250000,
+        'type': 'comprehensive',
+        'is_active': 1,
+        'created_at': now,
+      },
+      {
+        'id': 'policy_quarterly',
+        'name': 'Quarterly Combo',
+        'description': 'Save more with 3-month coverage',
+        'premium_monthly': 549.0,
+        'coverage_amount': 150000,
+        'type': 'premium',
+        'is_active': 1,
+        'created_at': now,
+      },
+    ];
+
+    for (final policy in policies) {
+      _policiesMemory[policy['id'] as String] = policy;
     }
   }
 
-  /// Mock base premium because the README provides the formula but not base values.
-  double get basePremium {
-    switch (this) {
-      case PlanId.s:
-        return 500;
-      case PlanId.m:
-        return 875;
-      case PlanId.l:
-        return 1250;
+  Future<void> _onCreate(sqflite.Database db, int version) async {
+    await db.execute('''
+      CREATE TABLE $tableUsers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        role TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE $tablePolicies (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        premium_monthly REAL NOT NULL,
+        coverage_amount INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE $tableSelectedPolicies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT NOT NULL,
+        policy_id TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        payment_date TEXT,
+        amount_paid REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        FOREIGN KEY (user_email) REFERENCES $tableUsers(email) ON DELETE CASCADE,
+        FOREIGN KEY (policy_id) REFERENCES $tablePolicies(id) ON DELETE RESTRICT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE $tablePayments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT NOT NULL,
+        policy_id TEXT NOT NULL,
+        amount REAL NOT NULL,
+        gst REAL NOT NULL,
+        total REAL NOT NULL,
+        payment_method TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (user_email) REFERENCES $tableUsers(email) ON DELETE CASCADE,
+        FOREIGN KEY (policy_id) REFERENCES $tablePolicies(id) ON DELETE RESTRICT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE $tablePayouts (
+        id TEXT PRIMARY KEY,
+        reason TEXT NOT NULL,
+        payout_date TEXT NOT NULL,
+        amount REAL NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE $tableAlerts (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        trigger_description TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    ''');
+  }
+
+  Future<void> _seedDefaults(sqflite.Database db) async {
+    final now = DateTime.now().toIso8601String();
+
+    await db.insert(
+      tableUsers,
+      {
+        'email': 'rider@demo.com',
+        'password': 'demo123',
+        'role': UserRole.rider.name,
+        'created_at': now,
+      },
+      conflictAlgorithm: sqflite.ConflictAlgorithm.ignore,
+    );
+
+    await db.insert(
+      tableUsers,
+      {
+        'email': 'admin@demo.com',
+        'password': 'demo123',
+        'role': UserRole.admin.name,
+        'created_at': now,
+      },
+      conflictAlgorithm: sqflite.ConflictAlgorithm.ignore,
+    );
+
+    final policies = [
+      {
+        'id': 'policy_basic',
+        'name': 'Basic Coverage',
+        'description': 'Essential protection for daily commute',
+        'premium_monthly': 299.0,
+        'coverage_amount': 50000,
+        'type': 'basic',
+        'is_active': 1,
+        'created_at': now,
+      },
+      {
+        'id': 'policy_premium',
+        'name': 'Premium Plus',
+        'description': 'Complete coverage with enhanced benefits',
+        'premium_monthly': 599.0,
+        'coverage_amount': 100000,
+        'type': 'premium',
+        'is_active': 1,
+        'created_at': now,
+      },
+      {
+        'id': 'policy_comprehensive',
+        'name': 'Comprehensive Shield',
+        'description': 'Maximum protection with all benefits',
+        'premium_monthly': 999.0,
+        'coverage_amount': 250000,
+        'type': 'comprehensive',
+        'is_active': 1,
+        'created_at': now,
+      },
+      {
+        'id': 'policy_quarterly',
+        'name': 'Quarterly Combo',
+        'description': 'Save more with 3-month coverage',
+        'premium_monthly': 549.0,
+        'coverage_amount': 150000,
+        'type': 'premium',
+        'is_active': 1,
+        'created_at': now,
+      },
+    ];
+
+    for (final policy in policies) {
+      await db.insert(tablePolicies, policy, conflictAlgorithm: sqflite.ConflictAlgorithm.ignore);
     }
   }
 
-  Color get accent {
-    switch (this) {
-      case PlanId.s:
-        return const Color(0xFF2E86AB);
-      case PlanId.m:
-        return const Color(0xFFF18F01);
-      case PlanId.l:
-        return const Color(0xFF7B2CBF);
+  Future<AuthActionResult> loginUser({
+    required String email,
+    required String password,
+    required UserRole role,
+  }) async {
+    if (_useMemoryStore) {
+      final user = _usersMemory[email];
+      if (user == null) {
+        return const AuthActionResult(success: false, message: 'Account not found. Please register first.');
+      }
+
+      final storedRole = user['role'] as String;
+      final storedPassword = user['password'] as String;
+
+      if (storedRole != role.name) {
+        return AuthActionResult(
+          success: false,
+          message: 'This email is registered as $storedRole. Select the correct role.',
+        );
+      }
+
+      if (storedPassword != password) {
+        return const AuthActionResult(success: false, message: 'Incorrect password.');
+      }
+
+      return const AuthActionResult(success: true, message: 'Login successful.');
+    }
+
+    final db = await database;
+    final rows = await db.query(
+      tableUsers,
+      where: 'email = ?',
+      whereArgs: [email],
+      limit: 1,
+    );
+
+    if (rows.isEmpty) {
+      return const AuthActionResult(success: false, message: 'Account not found. Please register first.');
+    }
+
+    final user = rows.first;
+    final storedRole = user['role'] as String;
+    final storedPassword = user['password'] as String;
+
+    if (storedRole != role.name) {
+      return AuthActionResult(
+        success: false,
+        message: 'This email is registered as $storedRole. Select the correct role.',
+      );
+    }
+
+    if (storedPassword != password) {
+      return const AuthActionResult(success: false, message: 'Incorrect password.');
+    }
+
+    return const AuthActionResult(success: true, message: 'Login successful.');
+  }
+
+  Future<AuthActionResult> registerUser({
+    required String email,
+    required String password,
+    required UserRole role,
+  }) async {
+    if (_useMemoryStore) {
+      if (_usersMemory.containsKey(email)) {
+        return const AuthActionResult(success: false, message: 'Email already registered. Please login.');
+      }
+
+      _usersMemory[email] = {
+        'email': email,
+        'password': password,
+        'role': role.name,
+        'created_at': DateTime.now().toIso8601String(),
+      };
+      return const AuthActionResult(success: true, message: 'Registration successful.');
+    }
+
+    final db = await database;
+
+    try {
+      await db.insert(
+        tableUsers,
+        {
+          'email': email,
+          'password': password,
+          'role': role.name,
+          'created_at': DateTime.now().toIso8601String(),
+        },
+        conflictAlgorithm: sqflite.ConflictAlgorithm.abort,
+      );
+      return const AuthActionResult(success: true, message: 'Registration successful.');
+    } on sqflite.DatabaseException catch (_) {
+      return const AuthActionResult(success: false, message: 'Email already registered. Please login.');
     }
   }
+
+  Future<void> createOrReplaceSelectedPolicy({
+    required String userEmail,
+    required String policyId,
+    required DateTime startDate,
+  }) async {
+    if (_useMemoryStore) {
+      for (final row in _selectedPoliciesMemory) {
+        if (row['user_email'] == userEmail && (row['status'] == 'pending' || row['status'] == 'active')) {
+          row['status'] = 'inactive';
+        }
+      }
+
+      _selectedPolicyAutoId += 1;
+      _selectedPoliciesMemory.add({
+        'id': _selectedPolicyAutoId,
+        'user_email': userEmail,
+        'policy_id': policyId,
+        'start_date': startDate.toIso8601String(),
+        'payment_date': null,
+        'amount_paid': 0.0,
+        'status': 'pending',
+      });
+      return;
+    }
+
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.update(
+        tableSelectedPolicies,
+        {'status': 'inactive'},
+        where: 'user_email = ? AND status IN (?, ?)',
+        whereArgs: [userEmail, 'pending', 'active'],
+      );
+
+      await txn.insert(tableSelectedPolicies, {
+        'user_email': userEmail,
+        'policy_id': policyId,
+        'start_date': startDate.toIso8601String(),
+        'payment_date': null,
+        'amount_paid': 0,
+        'status': 'pending',
+      });
+    });
+  }
+
+  Future<Map<String, Object?>?> getLatestSelectedPolicy(String userEmail) async {
+    if (_useMemoryStore) {
+      final filtered = _selectedPoliciesMemory
+          .where((row) => row['user_email'] == userEmail && (row['status'] == 'pending' || row['status'] == 'active'))
+          .toList();
+      if (filtered.isEmpty) return null;
+      filtered.sort((a, b) => ((b['id'] as int?) ?? 0).compareTo((a['id'] as int?) ?? 0));
+      return filtered.first;
+    }
+
+    final db = await database;
+    final rows = await db.query(
+      tableSelectedPolicies,
+      where: 'user_email = ? AND status IN (?, ?)',
+      whereArgs: [userEmail, 'pending', 'active'],
+      orderBy: 'id DESC',
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first;
+  }
+
+  Future<void> activateSelectedPolicyAndRecordPayment({
+    required String userEmail,
+    required String policyId,
+    required double premiumAmount,
+    required double gstAmount,
+    required double totalAmount,
+    required String paymentMethod,
+  }) async {
+    if (_useMemoryStore) {
+      final nowIso = DateTime.now().toIso8601String();
+      final pendingRows = _selectedPoliciesMemory
+          .where((row) => row['user_email'] == userEmail && row['policy_id'] == policyId && row['status'] == 'pending')
+          .toList();
+
+      if (pendingRows.isNotEmpty) {
+        pendingRows.sort((a, b) => ((b['id'] as int?) ?? 0).compareTo((a['id'] as int?) ?? 0));
+        final row = pendingRows.first;
+        row['payment_date'] = nowIso;
+        row['amount_paid'] = totalAmount;
+        row['status'] = 'active';
+      }
+
+      _paymentAutoId += 1;
+      _paymentsMemory.add({
+        'id': _paymentAutoId,
+        'user_email': userEmail,
+        'policy_id': policyId,
+        'amount': premiumAmount,
+        'gst': gstAmount,
+        'total': totalAmount,
+        'payment_method': paymentMethod,
+        'status': 'success',
+        'created_at': nowIso,
+      });
+      return;
+    }
+
+    final db = await database;
+    final nowIso = DateTime.now().toIso8601String();
+
+    await db.transaction((txn) async {
+      final selectedRows = await txn.query(
+        tableSelectedPolicies,
+        where: 'user_email = ? AND policy_id = ? AND status = ?',
+        whereArgs: [userEmail, policyId, 'pending'],
+        orderBy: 'id DESC',
+        limit: 1,
+      );
+
+      if (selectedRows.isNotEmpty) {
+        final selectedId = selectedRows.first['id'] as int;
+        await txn.update(
+          tableSelectedPolicies,
+          {
+            'payment_date': nowIso,
+            'amount_paid': totalAmount,
+            'status': 'active',
+          },
+          where: 'id = ?',
+          whereArgs: [selectedId],
+        );
+      }
+
+      await txn.insert(tablePayments, {
+        'user_email': userEmail,
+        'policy_id': policyId,
+        'amount': premiumAmount,
+        'gst': gstAmount,
+        'total': totalAmount,
+        'payment_method': paymentMethod,
+        'status': 'success',
+        'created_at': nowIso,
+      });
+    });
+  }
+}
+
+extension PlanIdView on PlanId {
+  String get label => switch (this) { PlanId.s => 'S', PlanId.m => 'M', PlanId.l => 'L' };
+  int get weeklyCoverage => switch (this) { PlanId.s => 2000, PlanId.m => 3500, PlanId.l => 5000 };
+  double get basePremium => switch (this) { PlanId.s => 500, PlanId.m => 875, PlanId.l => 1250 };
+  Color get accent => switch (this) {
+    PlanId.s => const Color(0xFF0F766E),
+    PlanId.m => const Color(0xFFD97706),
+    PlanId.l => const Color(0xFF7C3AED),
+  };
 }
 
 class AuthUser {
   final String email;
   final UserRole role;
+
   const AuthUser({required this.email, required this.role});
 }
 
@@ -81,18 +610,13 @@ class Payout {
   final DateTime date;
   final double amount;
 
-  const Payout({
-    required this.id,
-    required this.reason,
-    required this.date,
-    required this.amount,
-  });
+  const Payout({required this.id, required this.reason, required this.date, required this.amount});
 }
 
 class FraudFlag {
   final String id;
   final String riderEmail;
-  final double score; // 0..1
+  final double score;
   final List<String> reasons;
   final DateTime createdAt;
 
@@ -105,79 +629,69 @@ class FraudFlag {
   });
 }
 
-double _severityToRisk(Severity s) {
-  switch (s) {
-    case Severity.low:
-      return 0.15;
-    case Severity.medium:
-      return 0.45;
-    case Severity.high:
-      return 0.8;
-  }
+class InsurancePolicy {
+  final String id;
+  final String name;
+  final String description;
+  final double premiumMonthly;
+  final int coverageAmount;
+  final List<String> coverageDetails;
+  final String type; // 'basic', 'premium', 'comprehensive'
+  final bool isActive;
+
+  const InsurancePolicy({
+    required this.id,
+    required this.name,
+    required this.description,
+    required this.premiumMonthly,
+    required this.coverageAmount,
+    required this.coverageDetails,
+    required this.type,
+    this.isActive = false,
+  });
 }
 
-double _clamp01(double v) => v.clamp(0.0, 1.0);
+class SelectedInsurance {
+  final InsurancePolicy policy;
+  final DateTime startDate;
+  final DateTime? paymentDate;
+  final double amountPaid;
 
-int _hashToInt(String s) {
-  // Deterministic, lightweight hash for mock data.
-  var h = 0;
-  for (final c in s.codeUnits) {
-    h = (h * 31 + c) & 0x7fffffff;
-  }
-  return h;
+  const SelectedInsurance({
+    required this.policy,
+    required this.startDate,
+    this.paymentDate,
+    this.amountPaid = 0,
+  });
 }
 
-double _seededDouble(String seed) {
-  final h = _hashToInt(seed);
-  return (h % 1000) / 1000.0; // 0..0.999
+double _clamp01(double value) => value.clamp(0.0, 1.0);
+
+String inrInt(int value) => '₹${value.toString()}';
+String inrAmt(double value) => '₹${value.toStringAsFixed(0)}';
+
+String formatDate(DateTime date) {
+  return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
 }
 
-String inrInt(int v) => '₹${v.toString()}';
-String inrAmt(double v) => '₹${v.toStringAsFixed(0)}';
-
-String formatDate(DateTime dt) {
-  return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
-}
-
-double computeWeeklyPremium({
-  required PlanId planId,
-  required double riskScore01,
-}) {
-  // README: Weekly Premium = Base Premium × (1 + 0.5 × Risk Score)
-  final base = planId.basePremium;
-  return base * (1 + 0.5 * riskScore01);
-}
-
-double computePotentialPayout({
-  required PlanId planId,
-  required RiskAlert alert,
-}) {
-  // README: Loss = max(0, E − A); Payout = Loss within weekly cap.
-  //
-  // Prototype note: since there is no backend earnings series yet, we simulate:
-  // - Expected earnings (E) as a fraction of weekly coverage cap.
-  // - Actual earnings (A) decreases more for higher severity.
-  final cap = planId.weeklyCoverage.toDouble();
-
-  final expectedFactor = 0.55 + (_seededDouble('${planId.name}:${alert.id}:E') * 0.15); // 0.55..0.7
-  final lossSeverity = 0.18 + (_severityToRisk(alert.severity) * 0.5);
-
-  final expectedEarnings = cap * expectedFactor;
-  final actualEarnings = max(0.0, expectedEarnings * (1 - lossSeverity));
-
-  final loss = max(0.0, expectedEarnings - actualEarnings);
-  return min(cap, loss);
+double _severityToRisk(Severity severity) {
+  return switch (severity) { Severity.low => 0.15, Severity.medium => 0.45, Severity.high => 0.8 };
 }
 
 double predictedRiskScoreForPlan(PlanId planId) {
-  // Mock "AI-generated risk score (0–1)".
-  final base = switch (planId) {
-    PlanId.s => 0.22,
-    PlanId.m => 0.38,
-    PlanId.l => 0.55,
-  };
-  final jitter = (_seededDouble('risk:${planId.name}') - 0.5) * 0.08; // +/-0.04
-  return _clamp01(base + jitter);
+  final base = switch (planId) { PlanId.s => 0.22, PlanId.m => 0.38, PlanId.l => 0.55 };
+  return _clamp01(base);
+}
+
+double computeWeeklyPremium({required PlanId planId, required double riskScore01}) {
+  return planId.basePremium * (1 + 0.5 * riskScore01);
+}
+
+double computePotentialPayout({required PlanId planId, required RiskAlert alert}) {
+  final cap = planId.weeklyCoverage.toDouble();
+  final expected = cap * (0.55 + (_severityToRisk(alert.severity) * 0.15));
+  final actual = max(0.0, expected * (1 - (0.2 + _severityToRisk(alert.severity) * 0.4)));
+  return min(cap, max(0.0, expected - actual));
 }
 
 class SurakshaRideApp extends StatefulWidget {
@@ -189,194 +703,367 @@ class SurakshaRideApp extends StatefulWidget {
 
 class _SurakshaRideAppState extends State<SurakshaRideApp> {
   AuthUser? _user;
-  PlanId _planId = PlanId.s;
+  PlanId _selectedPlan = PlanId.s;
+  late Future<void> _dbInitFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _dbInitFuture = AppDatabase.instance.init();
+  }
+
+  Future<AuthActionResult> _login({required String email, required String password, required UserRole role}) async {
+    final result = await AppDatabase.instance.loginUser(email: email, password: password, role: role);
+    if (result.success) {
+      setState(() => _user = AuthUser(email: email, role: role));
+    }
+    return result;
+  }
+
+  Future<AuthActionResult> _register({required String email, required String password, required UserRole role}) async {
+    final result = await AppDatabase.instance.registerUser(email: email, password: password, role: role);
+    if (result.success) {
+      setState(() => _user = AuthUser(email: email, role: role));
+    }
+    return result;
+  }
 
   @override
   Widget build(BuildContext context) {
-    const accent = Color(0xFF0B7285);
+    const accent = Color(0xFF0F766E);
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'SurakshaRide',
       theme: ThemeData(
-        useMaterial3: false,
+        useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: accent),
-        scaffoldBackgroundColor: const Color(0xFFF7F9FC),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: accent,
-          foregroundColor: Colors.white,
-          elevation: 0,
+        scaffoldBackgroundColor: const Color(0xFFF6F7FB),
+        appBarTheme: const AppBarTheme(backgroundColor: accent, foregroundColor: Colors.white),
+        bottomNavigationBarTheme: const BottomNavigationBarThemeData(
+          backgroundColor: Colors.white,
+          selectedItemColor: Color(0xFF0F766E),
+          unselectedItemColor: Color(0xFF64748B),
+          selectedLabelStyle: TextStyle(fontWeight: FontWeight.w700),
+          unselectedLabelStyle: TextStyle(fontWeight: FontWeight.w600),
+          showUnselectedLabels: true,
+          type: BottomNavigationBarType.fixed,
+          elevation: 12,
         ),
         cardTheme: const CardThemeData(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(14))),
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(18))),
         ),
-        snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
       ),
-      home: _user == null
-          ? LoginPage(
-              onLogin: (u) => setState(() => _user = u),
-            )
-          : (_user!.role == UserRole.rider
-              ? RiderHome(
-                  user: _user!,
-                  planId: _planId,
-                  onPlanChanged: (newPlan) => setState(() => _planId = newPlan),
-                  onSignOut: () => setState(() => _user = null),
-                )
-              : AdminHome(
-                  user: _user!,
-                  onSignOut: () => setState(() => _user = null),
-                  planIdHint: _planId,
-                )),
+        home: FutureBuilder<void>(
+          future: _dbInitFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const Scaffold(body: Center(child: CircularProgressIndicator()));
+            }
+
+            if (snapshot.hasError) {
+              return Scaffold(
+                body: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Text(
+                      'Failed to initialize database. Please restart the app.\n${snapshot.error}',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+              );
+            }
+
+            if (_user == null) {
+              return LoginPage(onLogin: _login, onRegister: _register);
+            }
+
+            return _user!.role == UserRole.rider
+                ? RiderHome(
+                    user: _user!,
+                    planId: _selectedPlan,
+                    onPlanChanged: (newPlan) => setState(() => _selectedPlan = newPlan),
+                    onSignOut: () => setState(() => _user = null),
+                  )
+                : AdminHome(
+                    user: _user!,
+                    planIdHint: _selectedPlan,
+                    onSignOut: () => setState(() => _user = null),
+                  );
+          },
+        ),
     );
   }
 }
 
 class LoginPage extends StatefulWidget {
-  final void Function(AuthUser user) onLogin;
-  const LoginPage({super.key, required this.onLogin});
+  final Future<AuthActionResult> Function({required String email, required String password, required UserRole role}) onLogin;
+  final Future<AuthActionResult> Function({required String email, required String password, required UserRole role}) onRegister;
+
+  const LoginPage({super.key, required this.onLogin, required this.onRegister});
 
   @override
   State<LoginPage> createState() => _LoginPageState();
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final _emailCtrl = TextEditingController(text: 'rider@demo.com');
-  final _passCtrl = TextEditingController(text: 'demo123');
-
+  final _email = TextEditingController(text: 'rider@demo.com');
+  final _password = TextEditingController(text: 'demo123');
+  final _confirmPassword = TextEditingController();
+  bool _showPassword = false;
+  bool _showConfirmPassword = false;
+  bool _isSubmitting = false;
   UserRole _role = UserRole.rider;
-  bool _showPass = false;
+  AuthMode _mode = AuthMode.login;
   String? _error;
+  String? _success;
 
   @override
   void dispose() {
-    _emailCtrl.dispose();
-    _passCtrl.dispose();
+    _email.dispose();
+    _password.dispose();
+    _confirmPassword.dispose();
     super.dispose();
   }
 
-  void _attemptLogin() {
-    setState(() => _error = null);
+  Future<void> _submit() async {
+    final email = _email.text.trim().toLowerCase();
+    final pass = _password.text;
+    final confirm = _confirmPassword.text;
 
-    final email = _emailCtrl.text.trim().toLowerCase();
-    final pass = _passCtrl.text;
-
-    final ok = switch (_role) {
-      UserRole.rider => (email == 'rider@demo.com' && pass == 'demo123'),
-      UserRole.admin => (email == 'admin@demo.com' && pass == 'demo123'),
-    };
-
-    if (!ok) {
-      setState(() => _error = 'Invalid demo credentials for $_role. Try demo123.');
+    if (email.isEmpty || !email.contains('@')) {
+      setState(() {
+        _error = 'Enter a valid email address.';
+        _success = null;
+      });
       return;
     }
 
-    widget.onLogin(AuthUser(email: email, role: _role));
+    if (pass.length < 6) {
+      setState(() {
+        _error = 'Password must be at least 6 characters.';
+        _success = null;
+      });
+      return;
+    }
+
+    if (_mode == AuthMode.register && pass != confirm) {
+      setState(() {
+        _error = 'Password and confirm password do not match.';
+        _success = null;
+      });
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+      _error = null;
+      _success = null;
+    });
+
+    final result = await (_mode == AuthMode.login
+        ? widget.onLogin(email: email, password: pass, role: _role)
+        : widget.onRegister(email: email, password: pass, role: _role));
+
+    if (!mounted) return;
+
+    setState(() => _isSubmitting = false);
+
+    if (!result.success) {
+      setState(() {
+        _error = result.message;
+        _success = null;
+      });
+      return;
+    }
+
+    setState(() {
+      _error = null;
+      _success = result.message;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    const accent = Color(0xFF0B7285);
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('SurakshaRide'),
-        backgroundColor: accent,
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1120),
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final stack = constraints.maxWidth < 900;
+                  return Flex(
+                    direction: stack ? Axis.vertical : Axis.horizontal,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(child: _HeroPanel()),
+                      if (!stack) const SizedBox(width: 20),
+                      Expanded(child: _LoginCard()),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
       ),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 920),
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: Row(
-              children: [
-                Expanded(child: _LeftHero()),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Card(
-                    elevation: 0,
-                    color: Colors.white,
-                    child: Padding(
-                      padding: const EdgeInsets.all(18),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Text(
-                            'Login',
-                            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 10),
-                          _RoleSelector(
-                            role: _role,
-                            onChanged: (r) => setState(() => _role = r),
-                          ),
-                          const SizedBox(height: 14),
-                          TextField(
-                            controller: _emailCtrl,
-                            keyboardType: TextInputType.emailAddress,
-                            decoration: const InputDecoration(
-                              labelText: 'Email',
-                              border: OutlineInputBorder(),
-                              prefixIcon: Icon(Icons.email_outlined),
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          TextField(
-                            controller: _passCtrl,
-                            obscureText: !_showPass,
-                            decoration: InputDecoration(
-                              labelText: 'Password',
-                              border: const OutlineInputBorder(),
-                              prefixIcon: const Icon(Icons.lock_outline),
-                              suffixIcon: IconButton(
-                                icon: Icon(_showPass ? Icons.visibility_off : Icons.visibility),
-                                onPressed: () => setState(() => _showPass = !_showPass),
-                              ),
-                            ),
-                          ),
-                          if (_error != null) ...[
-                            const SizedBox(height: 10),
-                            Text(
-                              _error!,
-                              style: const TextStyle(color: Colors.red, fontWeight: FontWeight.w600),
-                            ),
-                          ],
-                          const SizedBox(height: 14),
-                          ElevatedButton(
-                            onPressed: _attemptLogin,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: accent,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            ),
-                            child: const Text('Continue'),
-                          ),
-                          const SizedBox(height: 10),
-                          OutlinedButton(
-                            onPressed: () {
-                              if (_role == UserRole.rider) {
-                                setState(() {
-                                  _emailCtrl.text = 'rider@demo.com';
-                                  _passCtrl.text = 'demo123';
-                                });
-                              } else {
-                                setState(() {
-                                  _emailCtrl.text = 'admin@demo.com';
-                                  _passCtrl.text = 'demo123';
-                                });
-                              }
-                            },
-                            child: const Text('Fill Demo Credentials'),
-                          ),
-                          const SizedBox(height: 10),
-                          const Text(
-                            'Prototype UI: data are mocked (no backend yet).',
-                            style: TextStyle(color: Colors.black54),
-                          ),
-                        ],
-                      ),
+    );
+  }
+
+  Widget _LoginCard() {
+    return Card(
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_mode == AuthMode.login ? 'Login' : 'Register', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              Text(_mode == AuthMode.login ? 'Login as rider or admin.' : 'Create a rider or admin account.'),
+              const SizedBox(height: 16),
+              SegmentedButton<AuthMode>(
+                segments: const [
+                  ButtonSegment(value: AuthMode.login, label: Text('Login'), icon: Icon(Icons.login_outlined)),
+                  ButtonSegment(value: AuthMode.register, label: Text('Register'), icon: Icon(Icons.app_registration_outlined)),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (value) {
+                  setState(() {
+                    _mode = value.first;
+                    _error = null;
+                    _success = null;
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+              SegmentedButton<UserRole>(
+                segments: const [
+                  ButtonSegment(value: UserRole.rider, label: Text('Rider'), icon: Icon(Icons.directions_bike_outlined)),
+                  ButtonSegment(value: UserRole.admin, label: Text('Admin'), icon: Icon(Icons.admin_panel_settings_outlined)),
+                ],
+                selected: {_role},
+                onSelectionChanged: (value) {
+                  setState(() {
+                    _role = value.first;
+                    _error = null;
+                    _success = null;
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _email,
+                decoration: const InputDecoration(labelText: 'Email', border: OutlineInputBorder(), prefixIcon: Icon(Icons.email_outlined)),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _password,
+                obscureText: !_showPassword,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  border: const OutlineInputBorder(),
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  suffixIcon: IconButton(
+                    icon: Icon(_showPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined),
+                    onPressed: () => setState(() => _showPassword = !_showPassword),
+                  ),
+                ),
+              ),
+              if (_mode == AuthMode.register) ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _confirmPassword,
+                  obscureText: !_showConfirmPassword,
+                  decoration: InputDecoration(
+                    labelText: 'Confirm password',
+                    border: const OutlineInputBorder(),
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    suffixIcon: IconButton(
+                      icon: Icon(_showConfirmPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined),
+                      onPressed: () => setState(() => _showConfirmPassword = !_showConfirmPassword),
                     ),
                   ),
+                ),
+              ],
+              if (_success != null) ...[
+                const SizedBox(height: 10),
+                Text(_success!, style: const TextStyle(color: Colors.green, fontWeight: FontWeight.w600)),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Text(_error!, style: const TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
+              ],
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: _isSubmitting ? null : _submit,
+                child: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: _isSubmitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)),
+                        )
+                      : Text(_mode == AuthMode.login ? 'Login' : 'Register'),
+                ),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton(
+                onPressed: () {
+                  setState(() {
+                    _email.text = _role == UserRole.rider ? 'rider@demo.com' : 'admin@demo.com';
+                    _password.text = 'demo123';
+                    _confirmPassword.text = 'demo123';
+                    _error = null;
+                    _success = null;
+                  });
+                },
+                child: Text(_mode == AuthMode.login ? 'Fill demo credentials' : 'Use demo-style values'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HeroPanel extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF0B1020),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: DefaultTextStyle(
+          style: const TextStyle(color: Colors.white),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('SurakshaRide', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 10),
+                const Text('Weekly AI-powered parametric income protection for delivery partners.', style: TextStyle(fontSize: 26, height: 1.15, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 12),
+                Text('Automatically compensates income loss caused by rain, heat, AQI spikes, curfew/strike notifications, and simulated platform downtime.', style: TextStyle(color: Colors.white.withOpacity(0.78), height: 1.5)),
+                const SizedBox(height: 18),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: const [
+                    _HeroChip(icon: Icons.auto_graph_outlined, text: 'AI pricing'),
+                    _HeroChip(icon: Icons.bolt_outlined, text: 'Zero-touch payouts'),
+                    _HeroChip(icon: Icons.shield_outlined, text: 'Fraud scoring'),
+                    _HeroChip(icon: Icons.wallet_outlined, text: 'Protection wallet'),
+                  ],
                 ),
               ],
             ),
@@ -387,105 +1074,20 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
-class _LeftHero extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Card(
-      color: Colors.white,
-      elevation: 0,
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'AI-powered, weekly parametric income protection',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Auto-triggers payouts using external signals (weather, AQI, and simulated platform outage). No claims workflow for riders.',
-              style: TextStyle(color: Colors.black.withOpacity(0.7), height: 1.3),
-            ),
-            const SizedBox(height: 16),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                _HeroChip(icon: Icons.auto_awesome_outlined, text: 'AI risk pricing'),
-                _HeroChip(icon: Icons.auto_fix_high_outlined, text: 'Zero-claims payouts'),
-                _HeroChip(icon: Icons.wallet_travel_outlined, text: 'Protection wallet'),
-                _HeroChip(icon: Icons.shield_outlined, text: 'Fraud detection (prototype)'),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: cs.primary.withOpacity(0.25)),
-                color: cs.primary.withOpacity(0.06),
-              ),
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Weekly plans', style: TextStyle(fontWeight: FontWeight.bold)),
-                  SizedBox(height: 8),
-                  Text('S: ₹2,000 weekly coverage'),
-                  Text('M: ₹3,500 weekly coverage'),
-                  Text('L: ₹5,000 weekly coverage'),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _HeroChip extends StatelessWidget {
   final IconData icon;
   final String text;
+
   const _HeroChip({required this.icon, required this.text});
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     return Chip(
+      avatar: Icon(icon, size: 18, color: Colors.white),
       label: Text(text),
-      avatar: Icon(icon, size: 18, color: cs.primary),
-      backgroundColor: cs.primary.withOpacity(0.07),
-    );
-  }
-}
-
-class _RoleSelector extends StatelessWidget {
-  final UserRole role;
-  final ValueChanged<UserRole> onChanged;
-  const _RoleSelector({required this.role, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('Login as', style: TextStyle(fontWeight: FontWeight.w600)),
-        const SizedBox(height: 8),
-        ToggleButtons(
-          isSelected: [role == UserRole.rider, role == UserRole.admin],
-          onPressed: (idx) => onChanged(idx == 0 ? UserRole.rider : UserRole.admin),
-          borderRadius: BorderRadius.circular(12),
-          selectedColor: Colors.white,
-          fillColor: Theme.of(context).colorScheme.primary,
-          constraints: const BoxConstraints(minWidth: 120, minHeight: 42),
-          children: const [
-            Row(children: [Icon(Icons.directions_bike), SizedBox(width: 6), Text('Rider')]),
-            Row(children: [Icon(Icons.admin_panel_settings), SizedBox(width: 6), Text('Admin')]),
-          ],
-        ),
-      ],
+      labelStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+      backgroundColor: Colors.white.withOpacity(0.12),
+      side: BorderSide(color: Colors.white.withOpacity(0.15)),
     );
   }
 }
@@ -510,151 +1112,229 @@ class RiderHome extends StatefulWidget {
 
 class _RiderHomeState extends State<RiderHome> {
   int _tabIndex = 0;
-  late PlanId _selectedPlanId;
-
+  late PlanId _selectedPlan;
   double _walletBalance = 1200;
+  late List<RiskAlert> _alerts;
   final List<Payout> _payouts = [];
   final Set<String> _simulatedAlertIds = {};
-  late List<RiskAlert> _alerts;
+  late List<InsurancePolicy> _insurancePolicies;
+  late SelectedInsurance? _selectedInsurance;
 
   @override
   void initState() {
     super.initState();
-    _selectedPlanId = widget.planId;
-    _alerts = _buildAlertsForDemo(widget.planId);
+    _selectedPlan = widget.planId;
+    _alerts = _buildAlerts();
+    _insurancePolicies = _buildInsurancePolicies();
+    _selectedInsurance = null;
+    _loadPersistedInsuranceSelection();
   }
 
   @override
   void didUpdateWidget(covariant RiderHome oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.planId != widget.planId) {
-      _selectedPlanId = widget.planId;
-      _alerts = _buildAlertsForDemo(widget.planId);
+      _selectedPlan = widget.planId;
+      _alerts = _buildAlerts();
     }
   }
 
-  List<RiskAlert> _buildAlertsForDemo(PlanId planId) {
+  List<RiskAlert> _buildAlerts() {
     final now = DateTime.now();
     return [
-      RiskAlert(
-        id: 'rain',
-        title: 'Rainfall spike',
-        triggerDescription: 'Rainfall >= 50 mm in 24 hours',
-        severity: planId == PlanId.s ? Severity.medium : Severity.high,
-        createdAt: now.subtract(const Duration(hours: 11)),
+      RiskAlert(id: 'rain', title: 'Rainfall spike', triggerDescription: 'Rainfall >= 50 mm in 24 hours', severity: Severity.high, createdAt: now.subtract(const Duration(hours: 6))),
+      RiskAlert(id: 'heat', title: 'Extreme heat', triggerDescription: 'Temperature >= 42°C', severity: Severity.medium, createdAt: now.subtract(const Duration(hours: 12))),
+      RiskAlert(id: 'aqi', title: 'AQI escalation', triggerDescription: 'AQI >= 300 for extended duration', severity: Severity.medium, createdAt: now.subtract(const Duration(days: 1))),
+      RiskAlert(id: 'outage', title: 'Platform outage', triggerDescription: 'Platform downtime >= 30 minutes during peak hours', severity: Severity.high, createdAt: now.subtract(const Duration(days: 2))),
+    ];
+  }
+
+  List<InsurancePolicy> _buildInsurancePolicies() {
+    return [
+      InsurancePolicy(
+        id: 'policy_basic',
+        name: 'Basic Coverage',
+        description: 'Essential protection for daily commute',
+        premiumMonthly: 299,
+        coverageAmount: 50000,
+        coverageDetails: ['Accident coverage up to ₹50,000', 'Basic medical benefits', '24/7 customer support', 'Valid for 1 month'],
+        type: 'basic',
       ),
-      RiskAlert(
-        id: 'temp',
-        title: 'Extreme heat',
-        triggerDescription: 'Temperature >= 42°C',
-        severity: planId == PlanId.l ? Severity.high : Severity.medium,
-        createdAt: now.subtract(const Duration(hours: 23)),
+      InsurancePolicy(
+        id: 'policy_premium',
+        name: 'Premium Plus',
+        description: 'Complete coverage with enhanced benefits',
+        premiumMonthly: 599,
+        coverageAmount: 100000,
+        coverageDetails: ['Accident coverage up to ₹100,000', 'Comprehensive medical benefits', 'Disability coverage', 'Free ambulance service', '24/7 priority support', 'Valid for 1 month'],
+        type: 'premium',
       ),
-      RiskAlert(
-        id: 'aqi',
-        title: 'AQI escalation',
-        triggerDescription: 'AQI >= 300 for extended duration',
-        severity: Severity.medium,
-        createdAt: now.subtract(const Duration(days: 1, hours: 4)),
+      InsurancePolicy(
+        id: 'policy_comprehensive',
+        name: 'Comprehensive Shield',
+        description: 'Maximum protection with all benefits',
+        premiumMonthly: 999,
+        coverageAmount: 250000,
+        coverageDetails: ['Accident coverage up to ₹250,000', 'Full medical & hospitalization', 'Disability & loss of income', 'Free ambulance service', 'Personal accident coverage', 'Legal liability coverage', '24/7 premium support', 'Valid for 1 month'],
+        type: 'comprehensive',
       ),
-      RiskAlert(
-        id: 'outage',
-        title: 'Platform outage',
-        triggerDescription: 'Platform downtime >= 30 minutes during peak hours',
-        severity: planId == PlanId.s ? Severity.low : Severity.medium,
-        createdAt: now.subtract(const Duration(days: 2)),
+      InsurancePolicy(
+        id: 'policy_quarterly',
+        name: 'Quarterly Combo',
+        description: 'Save more with 3-month coverage',
+        premiumMonthly: 549,
+        coverageAmount: 150000,
+        coverageDetails: ['Accident coverage up to ₹150,000', 'Complete medical benefits', '25% savings vs monthly', '3-month validity', 'Free claim processing'],
+        type: 'premium',
       ),
     ];
+  }
+
+  Future<void> _loadPersistedInsuranceSelection() async {
+    final selectedMap = await AppDatabase.instance.getLatestSelectedPolicy(widget.user.email);
+    if (!mounted || selectedMap == null) return;
+
+    final policyId = selectedMap['policy_id'] as String;
+    final policy = _insurancePolicies.where((p) => p.id == policyId).cast<InsurancePolicy?>().firstWhere((p) => p != null, orElse: () => null);
+    if (policy == null) return;
+
+    final startDateStr = selectedMap['start_date'] as String;
+    final paymentDateStr = selectedMap['payment_date'] as String?;
+    final amountPaidRaw = selectedMap['amount_paid'];
+
+    setState(() {
+      _selectedInsurance = SelectedInsurance(
+        policy: policy,
+        startDate: DateTime.tryParse(startDateStr) ?? DateTime.now(),
+        paymentDate: paymentDateStr == null ? null : DateTime.tryParse(paymentDateStr),
+        amountPaid: amountPaidRaw is num ? amountPaidRaw.toDouble() : 0,
+      );
+    });
+  }
+
+  Future<void> _handlePolicySelection(InsurancePolicy policy) async {
+    final selected = SelectedInsurance(policy: policy, startDate: DateTime.now());
+    setState(() {
+      _selectedInsurance = selected;
+      _tabIndex = 6;
+    });
+
+    await AppDatabase.instance.createOrReplaceSelectedPolicy(
+      userEmail: widget.user.email,
+      policyId: policy.id,
+      startDate: selected.startDate,
+    );
+  }
+
+  Future<void> _handlePaymentSuccess({
+    required double totalAmount,
+    required double gstAmount,
+    required String paymentMethod,
+  }) async {
+    if (_selectedInsurance == null) return;
+
+    final selected = _selectedInsurance!;
+    await AppDatabase.instance.activateSelectedPolicyAndRecordPayment(
+      userEmail: widget.user.email,
+      policyId: selected.policy.id,
+      premiumAmount: selected.policy.premiumMonthly,
+      gstAmount: gstAmount,
+      totalAmount: totalAmount,
+      paymentMethod: paymentMethod,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _walletBalance -= totalAmount;
+      _selectedInsurance = SelectedInsurance(
+        policy: selected.policy,
+        startDate: selected.startDate,
+        paymentDate: DateTime.now(),
+        amountPaid: totalAmount,
+      );
+      _tabIndex = 0;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Insurance activated successfully! Amount: ${inrAmt(totalAmount)}')),
+    );
   }
 
   void _simulatePayout(RiskAlert alert) {
     if (_simulatedAlertIds.contains(alert.id)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('This alert has already been simulated this session.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('This trigger was already simulated.')));
       return;
     }
 
-    final amount = computePotentialPayout(planId: _selectedPlanId, alert: alert);
-    final payout = Payout(
-      id: 'p_${alert.id}_${_selectedPlanId.name}',
-      reason: alert.title,
-      date: DateTime.now(),
-      amount: amount,
-    );
-
+    final amount = computePotentialPayout(planId: _selectedPlan, alert: alert);
     setState(() {
       _simulatedAlertIds.add(alert.id);
       _walletBalance += amount;
-      _payouts.insert(0, payout);
+      _payouts.insert(0, Payout(id: 'p_${alert.id}', reason: alert.title, date: DateTime.now(), amount: amount));
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Payout simulated: ${inrAmt(amount)} credited to wallet.')),
-    );
-  }
-
-  void _onPlanChanged(PlanId newPlan) {
-    widget.onPlanChanged(newPlan);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payout credited: ${inrAmt(amount)}')));
   }
 
   @override
   Widget build(BuildContext context) {
-    final pages = <Widget>[
+    final pages = [
       RiderDashboardPage(
         user: widget.user,
-        planId: _selectedPlanId,
+        planId: _selectedPlan,
         walletBalance: _walletBalance,
         alerts: _alerts,
         payouts: _payouts,
         onGoToAlerts: () => setState(() => _tabIndex = 3),
+        onGoToInsurance: () => setState(() => _tabIndex = 5),
+        onGoToPayment: () => setState(() => _tabIndex = 6),
       ),
-      RiderWalletPage(
-        planId: _selectedPlanId,
+      RiderWalletPage(planId: _selectedPlan, walletBalance: _walletBalance, payouts: _payouts, onGoToPlans: () => setState(() => _tabIndex = 2)),
+      RiderPricingPage(planId: _selectedPlan, onPlanSelected: (plan) {
+        setState(() => _selectedPlan = plan);
+        widget.onPlanChanged(plan);
+      }),
+      RiderAlertsPage(planId: _selectedPlan, alerts: _alerts, simulatedAlertIds: _simulatedAlertIds, onSimulatePayout: _simulatePayout),
+      RiderInsightsPage(planId: _selectedPlan),
+      InsurancePolicyPage(
+        policies: _insurancePolicies,
+        selectedInsurance: _selectedInsurance,
+        onPolicySelected: (policy) {
+          _handlePolicySelection(policy);
+        },
+      ),
+      InsurancePaymentPage(
+        selectedInsurance: _selectedInsurance,
         walletBalance: _walletBalance,
-        payouts: _payouts,
-        onGoToPlans: () => setState(() => _tabIndex = 2),
-      ),
-      RiderPricingPage(
-        planId: _selectedPlanId,
-        onPlanSelected: _onPlanChanged,
-      ),
-      RiderAlertsPage(
-        planId: _selectedPlanId,
-        alerts: _alerts,
-        simulatedAlertIds: _simulatedAlertIds,
-        onSimulatePayout: _simulatePayout,
+        planId: _selectedPlan,
+        onPaymentSuccess: _handlePaymentSuccess,
       ),
     ];
 
-    final tabs = <String>['Dashboard', 'Wallet', 'Plans', 'Alerts'];
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Rider Console'),
-        actions: [
-          IconButton(
-            tooltip: 'Sign out',
-            onPressed: widget.onSignOut,
-            icon: const Icon(Icons.logout_outlined),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Rider Console'), actions: [IconButton(onPressed: widget.onSignOut, icon: const Icon(Icons.logout_outlined))]),
       body: pages[_tabIndex],
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _tabIndex,
-        onTap: (i) => setState(() => _tabIndex = i),
-        items: [
-          _bottomItem(Icons.dashboard_outlined, tabs[0]),
-          _bottomItem(Icons.wallet_outlined, tabs[1]),
-          _bottomItem(Icons.card_membership_outlined, tabs[2]),
-          _bottomItem(Icons.notifications_outlined, tabs[3]),
+        type: BottomNavigationBarType.fixed,
+        selectedItemColor: const Color(0xFF0F766E),
+        unselectedItemColor: const Color(0xFF64748B),
+        backgroundColor: Colors.white,
+        selectedFontSize: 12,
+        unselectedFontSize: 12,
+        onTap: (index) => setState(() => _tabIndex = index),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.dashboard_outlined), label: 'Dashboard'),
+          BottomNavigationBarItem(icon: Icon(Icons.wallet_outlined), label: 'Wallet'),
+          BottomNavigationBarItem(icon: Icon(Icons.card_membership_outlined), label: 'Plans'),
+          BottomNavigationBarItem(icon: Icon(Icons.notifications_outlined), label: 'Alerts'),
+          BottomNavigationBarItem(icon: Icon(Icons.insights_outlined), label: 'Insights'),
+          BottomNavigationBarItem(icon: Icon(Icons.security_outlined), label: 'Insurance'),
+          BottomNavigationBarItem(icon: Icon(Icons.payment_outlined), label: 'Payment'),
         ],
       ),
     );
-  }
-
-  BottomNavigationBarItem _bottomItem(IconData icon, String label) {
-    return BottomNavigationBarItem(icon: Icon(icon), label: label);
   }
 }
 
@@ -665,6 +1345,8 @@ class RiderDashboardPage extends StatelessWidget {
   final List<RiskAlert> alerts;
   final List<Payout> payouts;
   final VoidCallback onGoToAlerts;
+  final VoidCallback onGoToInsurance;
+  final VoidCallback onGoToPayment;
 
   const RiderDashboardPage({
     super.key,
@@ -674,258 +1356,275 @@ class RiderDashboardPage extends StatelessWidget {
     required this.alerts,
     required this.payouts,
     required this.onGoToAlerts,
+    required this.onGoToInsurance,
+    required this.onGoToPayment,
   });
 
   @override
   Widget build(BuildContext context) {
     final risk = predictedRiskScoreForPlan(planId);
-    final weeklyPremium = computeWeeklyPremium(planId: planId, riskScore01: risk);
-
+    final premium = computeWeeklyPremium(planId: planId, riskScore01: risk);
+    final highAlerts = alerts.where((alert) => alert.severity == Severity.high).length;
+    final mediumAlerts = alerts.where((alert) => alert.severity == Severity.medium).length;
+    final potentialExposure = alerts.fold<double>(
+      0,
+      (total, alert) => total + computePotentialPayout(planId: planId, alert: alert),
+    );
+    final walletReadiness = _clamp01(walletBalance / (planId.weeklyCoverage * 1.8));
     final nextPayoutDate = DateTime.now().add(const Duration(days: 3));
-    final activeHigh = alerts.where((a) => a.severity == Severity.high).toList();
-    final aiSummary = activeHigh.isEmpty
-        ? 'Signals within tolerance. Minimal risk expected this week.'
-        : 'Elevated risk detected. Parametric triggers may activate payouts.';
+    final topAlerts = [...alerts]
+      ..sort((a, b) => _severityWeight(b.severity).compareTo(_severityWeight(a.severity)));
 
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Card(
+          color: planId.accent.withOpacity(0.07),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Hi ${user.email.split('@').first}',
+                        style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                    Chip(
+                      label: Text('Plan ${planId.label}'),
+                      backgroundColor: planId.accent.withOpacity(0.12),
+                      side: BorderSide(color: planId.accent.withOpacity(0.35)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Weekly AI-driven income protection overview',
+                  style: TextStyle(color: Colors.black.withOpacity(0.62)),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 16,
+                  runSpacing: 10,
+                  children: [
+                    _quickMetric('Next payout', formatDate(nextPayoutDate), planId.accent),
+                    _quickMetric('Potential exposure', inrAmt(potentialExposure), planId.accent),
+                    _quickMetric('High-risk windows', '$highAlerts', Colors.red),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Hi ${user.email.split('@').first},',
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: planId.accent.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(color: planId.accent.withOpacity(0.35)),
-                  ),
-                  child: Text(
-                    'Plan ${planId.name}',
-                    style: TextStyle(color: planId.accent, fontWeight: FontWeight.w700),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-
-            Row(
-              children: [
-                Expanded(
-                  child: _StatCard(
-                    title: 'Weekly coverage cap',
-                    value: inrInt(planId.weeklyCoverage),
-                    icon: Icons.shield_outlined,
-                    accent: planId.accent,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatCard(
-                    title: 'Your AI risk score',
-                    value: '${risk.toStringAsFixed(2)} / 1.00',
-                    icon: Icons.auto_graph_outlined,
-                    accent: planId.accent,
-                    sub: 'Drives dynamic pricing',
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            Row(
-              children: [
-                Expanded(
-                  child: _StatCard(
-                    title: 'Predicted weekly premium',
-                    value: inrAmt(weeklyPremium),
-                    icon: Icons.receipt_long_outlined,
-                    accent: planId.accent,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatCard(
-                    title: 'Next payout date',
-                    value: formatDate(nextPayoutDate),
-                    icon: Icons.schedule_outlined,
-                    accent: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-            Card(
-              elevation: 0,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('AI Prediction Summary', style: TextStyle(fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 6),
-                    Text(
-                      aiSummary,
-                      style: TextStyle(color: Colors.black.withOpacity(0.7), height: 1.3),
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 8,
-                      children: [
-                        _Pill(icon: Icons.near_me_outlined, text: 'Hyper-local pricing'),
-                        _Pill(icon: Icons.auto_fix_high_outlined, text: 'Zero-touch payouts'),
-                        _Pill(icon: Icons.location_on_outlined, text: 'Fraud scoring (prototype)'),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton.icon(
-                        onPressed: onGoToAlerts,
-                        icon: const Icon(Icons.notifications_active_outlined),
-                        label: const Text('View triggers & simulate'),
-                      ),
-                    )
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 12),
-            Card(
-              elevation: 0,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Wallet snapshot', style: TextStyle(fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Protection wallet balance: ${inrAmt(walletBalance)}',
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 10),
-                    const Divider(height: 1),
-                    const SizedBox(height: 10),
-                    const Text('Recent payouts (mock)', style: TextStyle(fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 10),
-                    if (payouts.isEmpty)
-                      const Text('No payouts simulated yet. Open Alerts and run a simulation.')
-                    else
-                      Column(
-                        children: payouts.take(4).map((p) {
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 6),
-                            child: Row(
-                              children: [
-                                Container(width: 10, height: 10, decoration: BoxDecoration(color: planId.accent, shape: BoxShape.circle)),
-                                const SizedBox(width: 10),
-                                Expanded(child: Text(p.reason, style: const TextStyle(fontWeight: FontWeight.w600))),
-                                Text(inrAmt(p.amount), style: TextStyle(color: planId.accent, fontWeight: FontWeight.w700)),
-                              ],
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                  ],
-                ),
-              ),
-            ),
+            _StatCard(title: 'Coverage cap', value: inrInt(planId.weeklyCoverage), accent: planId.accent, icon: Icons.shield_outlined),
+            _StatCard(title: 'Risk score', value: risk.toStringAsFixed(2), accent: planId.accent, icon: Icons.auto_graph_outlined),
+            _StatCard(title: 'Premium', value: inrAmt(premium), accent: planId.accent, icon: Icons.receipt_long_outlined),
+            _StatCard(title: 'High alerts', value: highAlerts.toString(), accent: Colors.red, icon: Icons.warning_amber_outlined),
           ],
         ),
+        const SizedBox(height: 16),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('AI summary', style: TextStyle(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 8),
+                Text(
+                  highAlerts == 0 ? 'Signals are within normal bounds for this week.' : 'Elevated conditions detected. Parametric payout windows may activate automatically.',
+                  style: TextStyle(color: Colors.black.withOpacity(0.68), height: 1.4),
+                ),
+                const SizedBox(height: 10),
+                LinearProgressIndicator(
+                  value: walletReadiness,
+                  minHeight: 8,
+                  backgroundColor: planId.accent.withOpacity(0.12),
+                  valueColor: AlwaysStoppedAnimation<Color>(planId.accent),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '${(walletReadiness * 100).toStringAsFixed(0)}% wallet readiness • Medium alerts: $mediumAlerts',
+                  style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12),
+                ),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: onGoToAlerts,
+                    icon: const Icon(Icons.notifications_active_outlined),
+                    label: const Text('Review triggers'),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: onGoToInsurance,
+                      icon: const Icon(Icons.security_outlined),
+                      label: const Text('Select insurance policy'),
+                    ),
+                    FilledButton.icon(
+                      onPressed: onGoToPayment,
+                      icon: const Icon(Icons.payment_outlined),
+                      label: const Text('Proceed to payment'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Protection wallet', style: TextStyle(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 8),
+                Text('Balance: ${inrAmt(walletBalance)}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: planId.accent)),
+                const SizedBox(height: 8),
+                Text('Recent payouts: ${payouts.isEmpty ? 'none yet' : payouts.length.toString()}', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+                const SizedBox(height: 10),
+                if (payouts.isEmpty)
+                  Text('No auto-credit event yet this week.', style: TextStyle(color: Colors.black.withOpacity(0.55), fontSize: 12))
+                else
+                  ...payouts.take(3).map(
+                        (payout) => Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              Icon(Icons.circle, size: 10, color: planId.accent),
+                              const SizedBox(width: 8),
+                              Expanded(child: Text('${payout.reason} • ${formatDate(payout.date)}')),
+                              Text(inrAmt(payout.amount), style: TextStyle(fontWeight: FontWeight.w900, color: planId.accent)),
+                            ],
+                          ),
+                        ),
+                      ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Active Trigger Windows', style: TextStyle(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 8),
+                if (topAlerts.isEmpty)
+                  const Text('No active trigger windows right now.')
+                else
+                  ...topAlerts.take(3).map(
+                        (alert) => Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.warning_amber_outlined, size: 18, color: _severityColor(alert.severity)),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(alert.title, style: const TextStyle(fontWeight: FontWeight.w800)),
+                                    const SizedBox(height: 2),
+                                    Text(alert.triggerDescription, style: TextStyle(color: Colors.black.withOpacity(0.62), fontSize: 12)),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                inrAmt(computePotentialPayout(planId: planId, alert: alert)),
+                                style: TextStyle(fontWeight: FontWeight.w900, color: planId.accent),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _quickMetric(String label, String value, Color accent) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: accent.withOpacity(0.08),
+        border: Border.all(color: accent.withOpacity(0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 2),
+          Text(value, style: TextStyle(fontWeight: FontWeight.w900, color: accent)),
+        ],
       ),
     );
+  }
+
+  int _severityWeight(Severity severity) {
+    return switch (severity) { Severity.high => 3, Severity.medium => 2, Severity.low => 1 };
+  }
+
+  Color _severityColor(Severity severity) {
+    return switch (severity) { Severity.high => Colors.red, Severity.medium => Colors.orange, Severity.low => Colors.green };
   }
 }
 
 class _StatCard extends StatelessWidget {
   final String title;
   final String value;
-  final IconData icon;
   final Color accent;
-  final String? sub;
-
-  const _StatCard({
-    required this.title,
-    required this.value,
-    required this.icon,
-    required this.accent,
-    this.sub,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                color: accent.withOpacity(0.12),
-                border: Border.all(color: accent.withOpacity(0.35)),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(icon, color: accent),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 6),
-                  Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: accent)),
-                  if (sub != null) ...[
-                    const SizedBox(height: 4),
-                    Text(sub!, style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
-                  ]
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _Pill extends StatelessWidget {
   final IconData icon;
-  final String text;
-  const _Pill({required this.icon, required this.text});
+
+  const _StatCard({required this.title, required this.value, required this.accent, required this.icon});
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: cs.primary.withOpacity(0.06),
-        border: Border.all(color: cs.primary.withOpacity(0.18)),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: cs.primary),
-          const SizedBox(width: 8),
-          Text(text, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
-        ],
+    return SizedBox(
+      width: 230,
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(width: 42, height: 42, decoration: BoxDecoration(color: accent.withOpacity(0.12), borderRadius: BorderRadius.circular(12)), child: Icon(icon, color: accent)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 4),
+                    Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: accent)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -937,119 +1636,73 @@ class RiderWalletPage extends StatelessWidget {
   final List<Payout> payouts;
   final VoidCallback onGoToPlans;
 
-  const RiderWalletPage({
-    super.key,
-    required this.planId,
-    required this.walletBalance,
-    required this.payouts,
-    required this.onGoToPlans,
-  });
+  const RiderWalletPage({super.key, required this.planId, required this.walletBalance, required this.payouts, required this.onGoToPlans});
 
   @override
   Widget build(BuildContext context) {
-    final cap = planId.weeklyCoverage.toDouble();
-    final progress01 = _clamp01(walletBalance / (cap * 1.8)); // mock readiness
+    final readiness = _clamp01(walletBalance / (planId.weeklyCoverage * 1.8));
 
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('Protection Wallet', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            Card(
-              elevation: 0,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('Protection Wallet', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Balance: ${inrAmt(walletBalance)}', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: planId.accent)),
+                const SizedBox(height: 10),
+                LinearProgressIndicator(value: readiness, minHeight: 10),
+                const SizedBox(height: 10),
+                Text('${(readiness * 100).toStringAsFixed(0)}% wallet readiness', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+                const SizedBox(height: 12),
+                Row(
                   children: [
-                    Text(
-                      'Balance: ${inrAmt(walletBalance)}',
-                      style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: planId.accent),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Weekly coverage anchor: ${inrInt(planId.weeklyCoverage)}',
-                      style: TextStyle(color: Colors.black.withOpacity(0.65)),
-                    ),
-                    const SizedBox(height: 10),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: LinearProgressIndicator(
-                        value: progress01,
-                        minHeight: 12,
-                        backgroundColor: planId.accent.withOpacity(0.12),
-                        valueColor: AlwaysStoppedAnimation<Color>(planId.accent),
+                    Expanded(child: OutlinedButton(onPressed: onGoToPlans, child: const Text('Change plan'))),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Add funds is a prototype placeholder.'))),
+                        child: const Text('Add funds'),
                       ),
                     ),
-                    const SizedBox(height: 10),
-                    Text(
-                      '${(progress01 * 100).toStringAsFixed(0)}% wallet readiness (mock).',
-                      style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12),
-                    ),
-                    const SizedBox(height: 14),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: onGoToPlans,
-                            icon: const Icon(Icons.card_membership_outlined),
-                            label: const Text('Change plan'),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Add funds is a placeholder in this prototype.')),
-                              );
-                            },
-                            icon: const Icon(Icons.add_circle_outline),
-                            label: const Text('Add funds (mock)'),
-                          ),
-                        ),
-                      ],
-                    ),
                   ],
                 ),
-              ),
+              ],
             ),
-            const SizedBox(height: 12),
-            Card(
-              elevation: 0,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Payout history (mock)', style: TextStyle(fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 10),
-                    if (payouts.isEmpty)
-                      const Text('No payouts yet. Open Alerts and simulate a trigger.')
-                    else
-                      ...payouts.take(6).map((p) {
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 6),
-                          child: Row(
-                            children: [
-                              Container(width: 10, height: 10, decoration: BoxDecoration(color: planId.accent, shape: BoxShape.circle)),
-                              const SizedBox(width: 10),
-                              Expanded(child: Text(p.reason, style: const TextStyle(fontWeight: FontWeight.w600))),
-                              Text(inrAmt(p.amount), style: TextStyle(color: planId.accent, fontWeight: FontWeight.w800)),
-                            ],
-                          ),
-                        );
-                      }).toList(),
-                  ],
-                ),
-              ),
-            ),
-          ],
+          ),
         ),
-      ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Payout history', style: TextStyle(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 8),
+                if (payouts.isEmpty)
+                  const Text('No payouts yet. Open Alerts and simulate a trigger.')
+                else
+                  ...payouts.map((payout) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          children: [
+                            Icon(Icons.circle, size: 10, color: planId.accent),
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(payout.reason, style: const TextStyle(fontWeight: FontWeight.w700))),
+                            Text(inrAmt(payout.amount), style: TextStyle(fontWeight: FontWeight.w900, color: planId.accent)),
+                          ],
+                        ),
+                      )),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1058,143 +1711,56 @@ class RiderPricingPage extends StatelessWidget {
   final PlanId planId;
   final ValueChanged<PlanId> onPlanSelected;
 
-  const RiderPricingPage({
-    super.key,
-    required this.planId,
-    required this.onPlanSelected,
-  });
+  const RiderPricingPage({super.key, required this.planId, required this.onPlanSelected});
 
   @override
   Widget build(BuildContext context) {
-    final risk = predictedRiskScoreForPlan(planId);
-    final premium = computeWeeklyPremium(planId: planId, riskScore01: risk);
-    final cards = PlanId.values;
+    final currentRisk = predictedRiskScoreForPlan(planId);
+    final currentPremium = computeWeeklyPremium(planId: planId, riskScore01: currentRisk);
 
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('Pricing & Plans', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Text(
-              'Weekly model aligned with rider payout cycles. Premium uses the formula from the README.',
-              style: TextStyle(color: Colors.black.withOpacity(0.65)),
-            ),
-            const SizedBox(height: 12),
-            Card(
-              elevation: 0,
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('Pricing & Plans', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 8),
+        Text('Weekly premium = base premium x (1 + 0.5 x risk score)', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+        const SizedBox(height: 12),
+        Card(child: Padding(padding: const EdgeInsets.all(18), child: Text('Current plan ${planId.label}: risk ${currentRisk.toStringAsFixed(2)}, estimated premium ${inrAmt(currentPremium)}', style: const TextStyle(fontWeight: FontWeight.w800)))),
+        const SizedBox(height: 12),
+        ...PlanId.values.map((plan) {
+          final risk = predictedRiskScoreForPlan(plan);
+          final premium = computeWeeklyPremium(planId: plan, riskScore01: risk);
+          final selected = plan == planId;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Card(
               child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.auto_graph_outlined, color: planId.accent, size: 22),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'Estimated risk score: ${risk.toStringAsFixed(2)}. Estimated weekly premium: ${inrAmt(premium)}.',
-                        style: const TextStyle(fontWeight: FontWeight.w700),
-                      ),
+                    Row(
+                      children: [
+                        Container(width: 38, height: 38, decoration: BoxDecoration(color: plan.accent.withOpacity(0.12), borderRadius: BorderRadius.circular(12)), child: Icon(Icons.card_membership_outlined, color: plan.accent)),
+                        const SizedBox(width: 12),
+                        Expanded(child: Text('Plan ${plan.label}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: plan.accent))),
+                        if (selected) const Chip(label: Text('Selected')),
+                      ],
                     ),
+                    const SizedBox(height: 8),
+                    Text('Coverage cap: ${inrInt(plan.weeklyCoverage)}'),
+                    Text('Base premium: ${inrAmt(plan.basePremium)}'),
+                    Text('Risk score: ${risk.toStringAsFixed(2)}'),
+                    Text('Estimated weekly premium: ${inrAmt(premium)}', style: TextStyle(fontWeight: FontWeight.w900, color: plan.accent)),
+                    const SizedBox(height: 10),
+                    FilledButton(onPressed: selected ? null : () => onPlanSelected(plan), child: Text(selected ? 'Selected' : 'Choose plan ${plan.label}')),
                   ],
                 ),
               ),
             ),
-            const SizedBox(height: 12),
-            LayoutBuilder(
-              builder: (context, c) {
-                final isWide = c.maxWidth > 760;
-                return GridView.count(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  crossAxisCount: isWide ? 3 : 1,
-                  mainAxisSpacing: 12,
-                  crossAxisSpacing: 12,
-                  childAspectRatio: isWide ? 1.05 : 2.1,
-                  children: cards.map((p) {
-                    final isSelected = p == planId;
-                    final riskP = predictedRiskScoreForPlan(p);
-                    final premiumP = computeWeeklyPremium(planId: p, riskScore01: riskP);
-
-                    return Card(
-                      elevation: 0,
-                      color: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        side: BorderSide(
-                          color: isSelected ? p.accent.withOpacity(0.85) : Colors.black12,
-                          width: isSelected ? 2 : 1,
-                        ),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Container(
-                                  width: 42,
-                                  height: 42,
-                                  decoration: BoxDecoration(
-                                    color: p.accent.withOpacity(0.12),
-                                    borderRadius: BorderRadius.circular(14),
-                                    border: Border.all(color: p.accent.withOpacity(0.35)),
-                                  ),
-                                  child: Icon(Icons.card_membership_outlined, color: p.accent),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Text(
-                                    'Plan ${p.name}',
-                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: p.accent),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 10),
-                            Text('Weekly coverage (cap): ${inrInt(p.weeklyCoverage)}',
-                                style: const TextStyle(fontWeight: FontWeight.w700)),
-                            const SizedBox(height: 6),
-                            Text('Base premium (mock): ${inrAmt(p.basePremium)}', style: TextStyle(color: Colors.black.withOpacity(0.6))),
-                            const SizedBox(height: 10),
-                            Text('Estimated weekly premium: ${inrAmt(premiumP)}',
-                                style: TextStyle(fontWeight: FontWeight.w800, color: p.accent)),
-                            const SizedBox(height: 8),
-                            Text('Risk score (mock AI): ${riskP.toStringAsFixed(2)}',
-                                style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
-                            const Spacer(),
-                            SizedBox(
-                              width: double.infinity,
-                              child: ElevatedButton(
-                                onPressed: () => onPlanSelected(p),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: isSelected ? p.accent : Colors.white,
-                                  foregroundColor: isSelected ? Colors.white : p.accent,
-                                  side: BorderSide(color: p.accent.withOpacity(isSelected ? 0 : 1), width: 1.5),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                  padding: const EdgeInsets.symmetric(vertical: 12),
-                                ),
-                                child: Text(isSelected ? 'Selected' : 'Choose Plan ${p.name}'),
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Triggered automatically by external signals (prototype).',
-                              style: TextStyle(color: Colors.black.withOpacity(0.55), fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
+          );
+        }),
+      ],
     );
   }
 }
@@ -1203,121 +1769,228 @@ class RiderAlertsPage extends StatelessWidget {
   final PlanId planId;
   final List<RiskAlert> alerts;
   final Set<String> simulatedAlertIds;
-  final void Function(RiskAlert alert) onSimulatePayout;
+  final ValueChanged<RiskAlert> onSimulatePayout;
 
-  const RiderAlertsPage({
-    super.key,
-    required this.planId,
-    required this.alerts,
-    required this.simulatedAlertIds,
-    required this.onSimulatePayout,
-  });
+  const RiderAlertsPage({super.key, required this.planId, required this.alerts, required this.simulatedAlertIds, required this.onSimulatePayout});
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: SingleChildScrollView(
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('Parametric Triggers', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 8),
+        Text('Weather, AQI, curfew/strike, and simulated downtime windows drive automatic payouts.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+        const SizedBox(height: 12),
+        _LossSimulatorCard(planId: planId, alerts: alerts),
+        const SizedBox(height: 12),
+        ...alerts.map((alert) {
+          final simulated = simulatedAlertIds.contains(alert.id);
+          final payout = computePotentialPayout(planId: planId, alert: alert);
+          final color = switch (alert.severity) { Severity.low => Colors.green, Severity.medium => Colors.orange, Severity.high => Colors.red };
+
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.warning_amber_outlined, color: color),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(alert.title, style: const TextStyle(fontWeight: FontWeight.w900))),
+                        Chip(label: Text(alert.severity.name.toUpperCase())),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(alert.triggerDescription),
+                    const SizedBox(height: 6),
+                    Text('Created: ${formatDate(alert.createdAt)}'),
+                    Text('Potential payout: ${inrAmt(payout)}', style: TextStyle(fontWeight: FontWeight.w900, color: planId.accent)),
+                    const SizedBox(height: 10),
+                    FilledButton(onPressed: simulated ? null : () => onSimulatePayout(alert), child: Text(simulated ? 'Simulated' : 'Simulate payout')),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }),
+      ],
+    );
+  }
+}
+
+class _LossSimulatorCard extends StatefulWidget {
+  final PlanId planId;
+  final List<RiskAlert> alerts;
+
+  const _LossSimulatorCard({required this.planId, required this.alerts});
+
+  @override
+  State<_LossSimulatorCard> createState() => _LossSimulatorCardState();
+}
+
+class _LossSimulatorCardState extends State<_LossSimulatorCard> {
+  late final TextEditingController _actual;
+  int _selectedIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _actual = TextEditingController(text: '300');
+  }
+
+  @override
+  void dispose() {
+    _actual.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final alert = widget.alerts[_selectedIndex];
+    final expected = widget.planId.weeklyCoverage * (0.54 + _severityToRisk(alert.severity) * 0.18);
+    final actual = double.tryParse(_actual.text) ?? 0;
+    final loss = max(0.0, expected - actual);
+    final payout = min(widget.planId.weeklyCoverage.toDouble(), loss);
+
+    return Card(
+      child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Risk Alerts & Parametric Triggers',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            const Text('Income-loss simulator', style: TextStyle(fontWeight: FontWeight.w900)),
             const SizedBox(height: 8),
-            Text(
-              'Signals are mocked from the README: Weather, AQI, Curfew/strike feed (simulated), and Platform downtime (simulated).',
-              style: TextStyle(color: Colors.black.withOpacity(0.65)),
+            Text('Loss = max(0, E - A). Prototype uses user-input actual earnings and AI-style expected earnings.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(
+              value: _selectedIndex,
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Select disruption window'),
+              items: List.generate(widget.alerts.length, (index) => DropdownMenuItem(value: index, child: Text(widget.alerts[index].title))),
+              onChanged: (value) => setState(() => _selectedIndex = value ?? 0),
             ),
             const SizedBox(height: 12),
-            ...alerts.map((a) {
-              final isSimulated = simulatedAlertIds.contains(a.id);
-              final potential = computePotentialPayout(planId: planId, alert: a);
-
-              final severityColor = switch (a.severity) {
-                Severity.low => Colors.green,
-                Severity.medium => Colors.orange,
-                Severity.high => Colors.red,
-              };
-
-              return Card(
-                elevation: 0,
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            width: 40,
-                            height: 40,
-                            decoration: BoxDecoration(
-                              color: severityColor.withOpacity(0.12),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: severityColor.withOpacity(0.35)),
-                            ),
-                            child: Icon(
-                              a.severity == Severity.high
-                                  ? Icons.warning_amber_rounded
-                                  : a.severity == Severity.medium
-                                      ? Icons.notifications_active_outlined
-                                      : Icons.check_circle_outline,
-                              color: severityColor,
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              a.title,
-                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
-                            ),
-                          ),
-                          Chip(
-                            backgroundColor: severityColor.withOpacity(0.12),
-                            side: BorderSide(color: severityColor.withOpacity(0.35)),
-                            label: Text(
-                              a.severity.name.toUpperCase(),
-                              style: TextStyle(fontWeight: FontWeight.w800, color: severityColor, fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(a.triggerDescription, style: TextStyle(color: Colors.black.withOpacity(0.66))),
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text('Created: ${formatDate(a.createdAt)}', style: const TextStyle(fontWeight: FontWeight.w700)),
-                          ),
-                          Text('Potential payout: ${inrAmt(potential)}', style: TextStyle(fontWeight: FontWeight.w900, color: planId.accent)),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: isSimulated ? null : () => onSimulatePayout(a),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: isSimulated ? Colors.black12 : planId.accent,
-                            foregroundColor: isSimulated ? Colors.black54 : Colors.white,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                          ),
-                          child: Text(isSimulated ? 'Simulated (this session)' : 'Simulate payout for this trigger'),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        'Logic (mock): Loss = max(0, E - A); payout is capped by plan weekly coverage.',
-                        style: TextStyle(color: Colors.black.withOpacity(0.5), fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }).toList(),
+            TextField(
+              controller: _actual,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Actual earnings (₹)'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _metric('Expected', inrAmt(expected), widget.planId.accent),
+                _metric('Actual', inrAmt(actual), widget.planId.accent),
+                _metric('Loss / payout', '${inrAmt(loss)} / ${inrAmt(payout)}', widget.planId.accent),
+              ],
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _metric(String label, String value, Color accent) {
+    return Container(
+      width: 180,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: accent.withOpacity(0.06), borderRadius: BorderRadius.circular(14), border: Border.all(color: accent.withOpacity(0.18))),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text(value, style: TextStyle(fontWeight: FontWeight.w900, color: accent)),
+        ],
+      ),
+    );
+  }
+}
+
+class RiderInsightsPage extends StatelessWidget {
+  final PlanId planId;
+
+  const RiderInsightsPage({super.key, required this.planId});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('Product Insights', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 8),
+        Text('Architecture, impact, risks, future scope, and use cases.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+        const SizedBox(height: 12),
+        _infoCard('System architecture', Icons.account_tree_outlined, [
+          'Mobile app for riders and admins',
+          'Policy, risk, payout, fraud, and integration services',
+          'PostgreSQL + Redis backend state',
+          'Python AI models for risk, pricing, prediction, and fraud scoring',
+        ]),
+        _infoCard('Impact', Icons.trending_up_outlined, [
+          'Reduces income uncertainty for gig workers',
+          'Fast, transparent payouts with no claims workflow',
+          'Improves retention and trust for platforms',
+          'Bridges the social security gap for gig workers',
+        ]),
+        _infoCard('Risks', Icons.warning_amber_outlined, [
+          'External data dependency',
+          'Trigger calibration issues',
+          'Limited platform integration access',
+          'Residual fraud risk',
+        ]),
+        _infoCard('Future scope', Icons.explore_outlined, [
+          'Ride-hailing expansion',
+          'Freelancer protection',
+          'Direct platform API integration',
+        ]),
+        _infoCard('Use cases', Icons.history_edu_outlined, [
+          'Heavy rain causing earnings loss',
+          'Extreme heat and AQI reducing hours',
+          'App outage during peak time',
+        ]),
+      ],
+    );
+  }
+
+  Widget _infoCard(String title, IconData icon, List<String> bullets) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(width: 40, height: 40, decoration: BoxDecoration(color: planId.accent.withOpacity(0.12), borderRadius: BorderRadius.circular(12)), child: Icon(icon, color: planId.accent)),
+                  const SizedBox(width: 12),
+                  Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              ...bullets.map((bullet) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('•'),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(bullet)),
+                      ],
+                    ),
+                  )),
+              const SizedBox(height: 8),
+              Text('Current plan ${planId.label}: coverage ${inrInt(planId.weeklyCoverage)}', style: TextStyle(color: planId.accent, fontWeight: FontWeight.w800)),
+            ],
+          ),
         ),
       ),
     );
@@ -1329,76 +2002,54 @@ class AdminHome extends StatelessWidget {
   final VoidCallback onSignOut;
   final PlanId planIdHint;
 
-  const AdminHome({
-    super.key,
-    required this.user,
-    required this.onSignOut,
-    required this.planIdHint,
-  });
+  const AdminHome({super.key, required this.user, required this.planIdHint, required this.onSignOut});
 
   @override
   Widget build(BuildContext context) {
-    final fraud = _buildFraudFlags();
-    final alerts = _buildAdminTriggerFeed();
-    final payouts = _buildAdminPayoutAudit(planIdHint);
+    final fraudFlags = _buildFraudFlags();
+    final alerts = _buildTriggerFeed();
+    final payouts = _buildAuditPayouts(planIdHint);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Admin Dashboard'),
-        actions: [
-          IconButton(
-            tooltip: 'Sign out',
-            onPressed: onSignOut,
-            icon: const Icon(Icons.logout_outlined),
+      appBar: AppBar(title: const Text('Admin Dashboard'), actions: [IconButton(onPressed: onSignOut, icon: const Icon(Icons.logout_outlined))]),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text('Welcome, ${user.email}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: const [
+                  _AdminChip(icon: Icons.auto_awesome_outlined, text: 'Risk model'),
+                  _AdminChip(icon: Icons.security_outlined, text: 'Fraud detection'),
+                  _AdminChip(icon: Icons.timeline_outlined, text: 'Trigger analytics'),
+                  _AdminChip(icon: Icons.assignment_turned_in_outlined, text: 'Payout audit'),
+                ],
+              ),
+            ),
           ),
+          const SizedBox(height: 12),
+          _section('Fraud detection', _FraudFlagsCard(flags: fraudFlags)),
+          _section('Trigger feed', _TriggerFeedCard(alerts: alerts)),
+          _section('Payout audit', _PayoutAuditCard(payouts: payouts, accent: planIdHint.accent)),
         ],
       ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                'Welcome, ${user.email}',
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 10),
-              Card(
-                elevation: 0,
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Prototype controls', style: TextStyle(fontWeight: FontWeight.w700)),
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 10,
-                        runSpacing: 10,
-                        children: const [
-                          _AdminChip(icon: Icons.auto_awesome_outlined, text: 'Risk model (mock)'),
-                          _AdminChip(icon: Icons.security_outlined, text: 'Fraud detection (prototype)'),
-                          _AdminChip(icon: Icons.timeline_outlined, text: 'Trigger analytics'),
-                          _AdminChip(icon: Icons.assignment_turned_in_outlined, text: 'Payout audit'),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              _SectionTitle(title: 'Fraud Detection (prototype)'),
-              _FraudFlagsCard(flags: fraud),
-              const SizedBox(height: 12),
-              _SectionTitle(title: 'Simulated trigger feed'),
-              _TriggerFeedCard(alerts: alerts),
-              const SizedBox(height: 12),
-              _SectionTitle(title: 'Payout audit log (mock)'),
-              _PayoutAuditCard(payouts: payouts),
-            ],
-          ),
-        ),
+    );
+  }
+
+  Widget _section(String title, Widget child) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(title, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16))),
+          child,
+        ],
       ),
     );
   }
@@ -1406,198 +2057,71 @@ class AdminHome extends StatelessWidget {
   List<FraudFlag> _buildFraudFlags() {
     final now = DateTime.now();
     return [
-      FraudFlag(
-        id: 'f1',
-        riderEmail: 'rider.alpha@demo.com',
-        score: 0.86,
-        reasons: const [
-          'GPS check anomaly',
-          'Rule-based behavior score spike',
-          'Unusual active hours vs local weather pattern',
-        ],
-        createdAt: now.subtract(const Duration(hours: 5)),
-      ),
-      FraudFlag(
-        id: 'f2',
-        riderEmail: 'rider.beta@demo.com',
-        score: 0.47,
-        reasons: const ['Mild route deviation', 'Short-lived location drift'],
-        createdAt: now.subtract(const Duration(days: 1, hours: 2)),
-      ),
-      FraudFlag(
-        id: 'f3',
-        riderEmail: 'rider.gamma@demo.com',
-        score: 0.22,
-        reasons: const ['No strong anomaly signals', 'Stable location adherence'],
-        createdAt: now.subtract(const Duration(days: 2)),
-      ),
+      FraudFlag(id: 'f1', riderEmail: 'rider.alpha@demo.com', score: 0.86, reasons: const ['GPS anomaly', 'Route deviation', 'Behavior spike'], createdAt: now.subtract(const Duration(hours: 5))),
+      FraudFlag(id: 'f2', riderEmail: 'rider.beta@demo.com', score: 0.44, reasons: const ['Short drift', 'Unusual stop pattern'], createdAt: now.subtract(const Duration(days: 1))),
+      FraudFlag(id: 'f3', riderEmail: 'rider.gamma@demo.com', score: 0.21, reasons: const ['No anomaly signals'], createdAt: now.subtract(const Duration(days: 2))),
     ];
   }
 
-  List<RiskAlert> _buildAdminTriggerFeed() {
+  List<RiskAlert> _buildTriggerFeed() {
     final now = DateTime.now();
     return [
-      RiskAlert(
-        id: 'rain_admin_1',
-        title: 'Rainfall >= 50mm',
-        triggerDescription: 'Parametric trigger: rainfall window breach detected',
-        severity: Severity.high,
-        createdAt: now.subtract(const Duration(hours: 9)),
-      ),
-      RiskAlert(
-        id: 'temp_admin_1',
-        title: 'Temp >= 42C',
-        triggerDescription: 'Heat stress window detected; delivery demand impacted',
-        severity: Severity.medium,
-        createdAt: now.subtract(const Duration(hours: 18)),
-      ),
-      RiskAlert(
-        id: 'outage_admin_1',
-        title: 'Platform downtime',
-        triggerDescription: 'Downtime >= 30 min during peak; outage signal simulated',
-        severity: Severity.medium,
-        createdAt: now.subtract(const Duration(days: 1, hours: 3)),
-      ),
-      RiskAlert(
-        id: 'aqi_admin_1',
-        title: 'AQI >= 300',
-        triggerDescription: 'Extended AQI escalation; curtailment expected',
-        severity: Severity.medium,
-        createdAt: now.subtract(const Duration(days: 2, hours: 2)),
-      ),
+      RiskAlert(id: 'rain_admin', title: 'Rainfall >= 50mm', triggerDescription: 'Parametric trigger detected', severity: Severity.high, createdAt: now.subtract(const Duration(hours: 9))),
+      RiskAlert(id: 'heat_admin', title: 'Temperature >= 42°C', triggerDescription: 'Heat wave detected', severity: Severity.medium, createdAt: now.subtract(const Duration(hours: 16))),
+      RiskAlert(id: 'outage_admin', title: 'Platform downtime', triggerDescription: 'Simulated outage during peak', severity: Severity.high, createdAt: now.subtract(const Duration(days: 1))),
     ];
   }
 
-  List<Payout> _buildAdminPayoutAudit(PlanId planId) {
+  List<Payout> _buildAuditPayouts(PlanId planId) {
+    final triggers = _buildTriggerFeed();
     final now = DateTime.now();
     return [
-      Payout(
-        id: 'pa1',
-        reason: 'Rainfall spike (weekly auto-trigger)',
-        date: now.subtract(const Duration(days: 1, hours: 6)),
-        amount: computePotentialPayout(
-          planId: planId,
-          alert: RiskAlert(
-            id: 'rain',
-            title: 'Rainfall spike',
-            triggerDescription: '',
-            severity: Severity.high,
-            createdAt: now,
-          ),
-        ),
-      ),
-      Payout(
-        id: 'pa2',
-        reason: 'Platform outage (parametric window)',
-        date: now.subtract(const Duration(days: 2, hours: 5)),
-        amount: computePotentialPayout(
-          planId: planId,
-          alert: RiskAlert(
-            id: 'outage',
-            title: 'Platform outage',
-            triggerDescription: '',
-            severity: Severity.medium,
-            createdAt: now,
-          ),
-        ),
-      ),
+      Payout(id: 'pa1', reason: 'Rainfall spike', date: now.subtract(const Duration(days: 1)), amount: computePotentialPayout(planId: planId, alert: triggers[0])),
+      Payout(id: 'pa2', reason: 'Outage window', date: now.subtract(const Duration(days: 2)), amount: computePotentialPayout(planId: planId, alert: triggers[2])),
     ];
-  }
-}
-
-class _SectionTitle extends StatelessWidget {
-  final String title;
-  const _SectionTitle({super.key, required this.title});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(left: 2, bottom: 8),
-      child: Text(title, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
-    );
   }
 }
 
 class _AdminChip extends StatelessWidget {
   final IconData icon;
   final String text;
+
   const _AdminChip({required this.icon, required this.text});
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Chip(
-      label: Text(text),
-      avatar: Icon(icon, color: cs.primary, size: 18),
-      backgroundColor: cs.primary.withOpacity(0.07),
-    );
+    return Chip(avatar: Icon(icon, size: 18), label: Text(text));
   }
 }
 
 class _FraudFlagsCard extends StatelessWidget {
   final List<FraudFlag> flags;
-  const _FraudFlagsCard({super.key, required this.flags});
+
+  const _FraudFlagsCard({required this.flags});
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      elevation: 0,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Fraud detection uses (prototype): GPS check, rule-based anomaly scoring, and simple scoring.',
-              style: TextStyle(color: Colors.black.withOpacity(0.65)),
-            ),
-            const SizedBox(height: 12),
-            ...flags.map((f) {
-              final severityColor = f.score >= 0.75
-                  ? Colors.red
-                  : f.score >= 0.4
-                      ? Colors.orange
-                      : Colors.green;
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 12,
-                      height: 12,
-                      decoration: BoxDecoration(color: severityColor, shape: BoxShape.circle),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(f.riderEmail, style: const TextStyle(fontWeight: FontWeight.w800)),
-                          const SizedBox(height: 4),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 4,
-                            children: f.reasons.take(3).map((r) {
-                              return Chip(label: Text(r, style: const TextStyle(fontSize: 12)));
-                            }).toList(),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Flag created: ${formatDate(f.createdAt)}',
-                            style: TextStyle(color: Colors.black.withOpacity(0.55), fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Text(
-                      'Score: ${(f.score * 100).toStringAsFixed(0)}%',
-                      style: TextStyle(fontWeight: FontWeight.w900, color: severityColor),
-                    ),
-                  ],
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: flags
+              .map(
+                (flag) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(flag.riderEmail, style: const TextStyle(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 4),
+                      Text('Score: ${(flag.score * 100).toStringAsFixed(0)}%'),
+                      Text('Created: ${formatDate(flag.createdAt)}', style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
+                    ],
+                  ),
                 ),
-              );
-            }).toList(),
-          ],
+              )
+              .toList(),
         ),
       ),
     );
@@ -1606,79 +2130,31 @@ class _FraudFlagsCard extends StatelessWidget {
 
 class _TriggerFeedCard extends StatelessWidget {
   final List<RiskAlert> alerts;
-  const _TriggerFeedCard({super.key, required this.alerts});
+
+  const _TriggerFeedCard({required this.alerts});
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      elevation: 0,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Admin view of parametric triggers (simulated feed):',
-              style: TextStyle(color: Colors.black.withOpacity(0.65)),
-            ),
-            const SizedBox(height: 12),
-            ...alerts.map((a) {
-              final severityColor = switch (a.severity) {
-                Severity.low => Colors.green,
-                Severity.medium => Colors.orange,
-                Severity.high => Colors.red,
-              };
-
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 7),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: severityColor.withOpacity(0.12),
-                        border: Border.all(color: severityColor.withOpacity(0.35)),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        a.severity == Severity.high
-                            ? Icons.warning_amber_rounded
-                            : a.severity == Severity.medium
-                                ? Icons.notifications_active_outlined
-                                : Icons.check_circle_outline,
-                        color: severityColor,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(a.title, style: const TextStyle(fontWeight: FontWeight.w900)),
-                          const SizedBox(height: 4),
-                          Text(a.triggerDescription, style: TextStyle(color: Colors.black.withOpacity(0.6))),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Created: ${formatDate(a.createdAt)}',
-                            style: TextStyle(color: Colors.black.withOpacity(0.5), fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Chip(
-                      backgroundColor: severityColor.withOpacity(0.12),
-                      side: BorderSide(color: severityColor.withOpacity(0.35)),
-                      label: Text(
-                        a.severity.name.toUpperCase(),
-                        style: TextStyle(color: severityColor, fontWeight: FontWeight.w800, fontSize: 12),
-                      ),
-                    ),
-                  ],
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: alerts
+              .map(
+                (alert) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(alert.title, style: const TextStyle(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 4),
+                      Text(alert.triggerDescription),
+                    ],
+                  ),
                 ),
-              );
-            }).toList(),
-          ],
+              )
+              .toList(),
         ),
       ),
     );
@@ -1687,57 +2163,495 @@ class _TriggerFeedCard extends StatelessWidget {
 
 class _PayoutAuditCard extends StatelessWidget {
   final List<Payout> payouts;
-  const _PayoutAuditCard({super.key, required this.payouts});
+  final Color accent;
+
+  const _PayoutAuditCard({required this.payouts, required this.accent});
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      elevation: 0,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Auto-credited payouts (mock audit):',
-              style: TextStyle(color: Colors.black.withOpacity(0.65)),
-            ),
-            const SizedBox(height: 12),
-            if (payouts.isEmpty)
-              const Text('No payout records.')
-            else
-              ...payouts.map((p) {
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 7),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: payouts
+              .map(
+                (payout) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
                   child: Row(
                     children: [
-                      Container(
-                        width: 12,
-                        height: 12,
-                        decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, shape: BoxShape.circle),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(p.reason, style: const TextStyle(fontWeight: FontWeight.w800)),
-                            const SizedBox(height: 4),
-                            Text('Audit ID: ${p.id}', style: TextStyle(color: Colors.black.withOpacity(0.55), fontSize: 12)),
-                            const SizedBox(height: 4),
-                            Text('Credited: ${formatDate(p.date)}', style: TextStyle(color: Colors.black.withOpacity(0.55), fontSize: 12)),
-                          ],
-                        ),
-                      ),
-                      Text(inrAmt(p.amount), style: TextStyle(fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.primary)),
+                      Icon(Icons.circle, size: 10, color: accent),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text('${payout.reason} - ${formatDate(payout.date)}')),
+                      Text(inrAmt(payout.amount), style: TextStyle(fontWeight: FontWeight.w900, color: accent)),
                     ],
                   ),
-                );
-              }).toList(),
-          ],
+                ),
+              )
+              .toList(),
         ),
       ),
     );
   }
 }
 
+class InsurancePolicyPage extends StatelessWidget {
+  final List<InsurancePolicy> policies;
+  final SelectedInsurance? selectedInsurance;
+  final ValueChanged<InsurancePolicy> onPolicySelected;
+
+  const InsurancePolicyPage({
+    super.key,
+    required this.policies,
+    required this.selectedInsurance,
+    required this.onPolicySelected,
+  });
+
+  Color _getPolicyColor(String type) {
+    return switch (type) {
+      'basic' => const Color(0xFF009688),
+      'premium' => const Color(0xFFD97706),
+      'comprehensive' => const Color(0xFF7C3AED),
+      _ => const Color(0xFF0F766E),
+    };
+  }
+
+  IconData _getPolicyIcon(String type) {
+    return switch (type) {
+      'basic' => Icons.shield_outlined,
+      'premium' => Icons.shield_sharp,
+      'comprehensive' => Icons.verified_user_outlined,
+      _ => Icons.security_outlined,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('Insurance Policies', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 8),
+        Text('Select an insurance policy to protect yourself', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+        const SizedBox(height: 16),
+        if (selectedInsurance != null)
+          Card(
+            color: const Color(0xFF0F766E).withOpacity(0.1),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.check_circle_outlined, color: Colors.green),
+                      const SizedBox(width: 8),
+                      Text('Active Policy: ${selectedInsurance!.policy.name}', style: const TextStyle(fontWeight: FontWeight.w900, color: Colors.green)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text('Validity: ${formatDate(selectedInsurance!.startDate)} to ${formatDate(selectedInsurance!.startDate.add(const Duration(days: 30)))}', style: TextStyle(color: Colors.black.withOpacity(0.6))),
+                  if (selectedInsurance!.paymentDate != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text('Paid: ${inrAmt(selectedInsurance!.amountPaid)} on ${formatDate(selectedInsurance!.paymentDate!)}', style: TextStyle(color: Colors.green, fontWeight: FontWeight.w700)),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        if (selectedInsurance != null) const SizedBox(height: 16),
+        const Text('Available Plans', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 12),
+        ...policies.map((policy) {
+          final color = _getPolicyColor(policy.type);
+          final icon = _getPolicyIcon(policy.type);
+          final isSelected = selectedInsurance?.policy.id == policy.id;
+
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Card(
+              elevation: isSelected ? 4 : 0,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: color.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(icon, color: color),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(policy.name, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: color)),
+                              const SizedBox(height: 4),
+                              Text(policy.description, style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
+                            ],
+                          ),
+                        ),
+                        if (isSelected)
+                          Chip(
+                            label: const Text('Selected'),
+                            backgroundColor: color.withOpacity(0.15),
+                            side: BorderSide(color: color),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Premium: ${inrAmt(policy.premiumMonthly)}/month', style: const TextStyle(fontWeight: FontWeight.w700)),
+                            Text('Coverage: ${inrInt(policy.coverageAmount)}', style: TextStyle(color: Colors.black.withOpacity(0.65), fontSize: 13)),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 8,
+                      children: policy.coverageDetails.take(3).map((detail) {
+                        return Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.check_circle_outlined, size: 16, color: color),
+                            const SizedBox(width: 4),
+                            Text(detail, style: const TextStyle(fontSize: 12)),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                    if (policy.coverageDetails.length > 3)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text('+${policy.coverageDetails.length - 3} more benefits', style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600)),
+                      ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: isSelected ? null : () => onPolicySelected(policy),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: color,
+                          disabledBackgroundColor: color.withOpacity(0.5),
+                        ),
+                        child: Text(isSelected ? 'Already Selected' : 'Select & Pay'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ],
+    );
+  }
+}
+
+class InsurancePaymentPage extends StatefulWidget {
+  final SelectedInsurance? selectedInsurance;
+  final double walletBalance;
+  final PlanId planId;
+  final Future<void> Function({required double totalAmount, required double gstAmount, required String paymentMethod}) onPaymentSuccess;
+
+  const InsurancePaymentPage({
+    super.key,
+    required this.selectedInsurance,
+    required this.walletBalance,
+    required this.planId,
+    required this.onPaymentSuccess,
+  });
+
+  @override
+  State<InsurancePaymentPage> createState() => _InsurancePaymentPageState();
+}
+
+class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
+  String _selectedPaymentMethod = 'wallet';
+  bool _agreedToTerms = false;
+  bool _isProcessing = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final policy = widget.selectedInsurance?.policy;
+
+    if (policy == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.shopping_cart_outlined, size: 64, color: Colors.grey),
+            const SizedBox(height: 16),
+            const Text('No policy selected', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            Text('Select an insurance policy first', style: TextStyle(color: Colors.black.withOpacity(0.6))),
+          ],
+        ),
+      );
+    }
+
+    final policyColor = _getPolicyColor(policy.type);
+    final gstAmount = (policy.premiumMonthly * 0.18);
+    final totalAmount = policy.premiumMonthly + gstAmount;
+    final canPay = widget.walletBalance >= totalAmount;
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('Payment', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 16),
+        Card(
+          color: policyColor.withOpacity(0.08),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: policyColor.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(Icons.verified_user_outlined, color: policyColor),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Order Summary', style: TextStyle(fontWeight: FontWeight.w900, color: policyColor)),
+                          Text(policy.name, style: TextStyle(fontWeight: FontWeight.w700)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Price Breakdown', style: TextStyle(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 12),
+                _priceRow('Policy Premium', inrAmt(policy.premiumMonthly), policyColor),
+                _priceRow('GST (18%)', inrAmt(gstAmount), Colors.grey, isGray: true),
+                const Divider(height: 12),
+                _priceRow('Total Amount', inrAmt(totalAmount), policyColor, isBold: true),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Select Payment Method', style: TextStyle(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 12),
+                RadioListTile<String>(
+                  value: 'wallet',
+                  groupValue: _selectedPaymentMethod,
+                  onChanged: (value) => setState(() => _selectedPaymentMethod = value ?? 'wallet'),
+                  title: const Text('Protection Wallet'),
+                  subtitle: Text('Available: ${inrAmt(widget.walletBalance)}'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+                RadioListTile<String>(
+                  value: 'card',
+                  groupValue: _selectedPaymentMethod,
+                  onChanged: (value) => setState(() => _selectedPaymentMethod = value ?? 'card'),
+                  title: const Text('Credit/Debit Card'),
+                  subtitle: const Text('Visa, Mastercard, RuPay'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+                RadioListTile<String>(
+                  value: 'upi',
+                  groupValue: _selectedPaymentMethod,
+                  onChanged: (value) => setState(() => _selectedPaymentMethod = value ?? 'upi'),
+                  title: const Text('UPI'),
+                  subtitle: const Text('Google Pay, PhonePe, Paytm'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        if (!canPay && _selectedPaymentMethod == 'wallet')
+          Card(
+            color: Colors.red.withOpacity(0.1),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Icon(Icons.warning_outlined, color: Colors.red),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Insufficient Balance', style: TextStyle(fontWeight: FontWeight.w700, color: Colors.red)),
+                        Text('Needed: ${inrAmt(totalAmount)} • Available: ${inrAmt(widget.walletBalance)}', style: TextStyle(color: Colors.red.withOpacity(0.8), fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        const SizedBox(height: 16),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Policy Details', style: TextStyle(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 12),
+                _detailRow('Coverage Amount', inrInt(policy.coverageAmount)),
+                _detailRow('Validity', '30 days from activation'),
+                _detailRow('Type', policy.type.toUpperCase()),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        CheckboxListTile(
+          value: _agreedToTerms,
+          onChanged: (value) => setState(() => _agreedToTerms = value ?? false),
+          title: RichText(
+            text: TextSpan(
+              text: 'I agree to the ',
+              style: TextStyle(color: Colors.black.withOpacity(0.7)),
+              children: [
+                TextSpan(
+                  text: 'Terms & Conditions',
+                  style: TextStyle(color: policyColor, fontWeight: FontWeight.w700),
+                ),
+                TextSpan(
+                  text: ' and ',
+                  style: TextStyle(color: Colors.black.withOpacity(0.7)),
+                ),
+                TextSpan(
+                  text: 'Privacy Policy',
+                  style: TextStyle(color: policyColor, fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+          ),
+          contentPadding: EdgeInsets.zero,
+        ),
+        const SizedBox(height: 16),
+        FilledButton(
+          onPressed: (!_agreedToTerms || (_selectedPaymentMethod == 'wallet' && !canPay) || _isProcessing)
+              ? null
+              : () => _processPayment(totalAmount, policyColor),
+          style: FilledButton.styleFrom(
+            backgroundColor: policyColor,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+          ),
+          child: _isProcessing
+              ? const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white))),
+                    SizedBox(width: 12),
+                    Text('Processing...'),
+                  ],
+                )
+              : Text('Complete Payment - ${inrAmt(totalAmount)}'),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton(
+          onPressed: _isProcessing ? null : () => ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment cancelled'))),
+          child: const Text('Cancel'),
+        ),
+        const SizedBox(height: 20),
+      ],
+    );
+  }
+
+  void _processPayment(double amount, Color color) {
+    final policy = widget.selectedInsurance?.policy;
+    if (policy == null) return;
+    final gstAmount = policy.premiumMonthly * 0.18;
+
+    setState(() => _isProcessing = true);
+
+    Future.delayed(const Duration(seconds: 2), () async {
+      if (mounted) {
+        await widget.onPaymentSuccess(
+          totalAmount: amount,
+          gstAmount: gstAmount,
+          paymentMethod: _selectedPaymentMethod,
+        );
+        if (mounted) {
+          setState(() => _isProcessing = false);
+        }
+      }
+    });
+  }
+
+  Widget _priceRow(String label, String amount, Color color, {bool isGray = false, bool isBold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontWeight: isGray ? FontWeight.w500 : FontWeight.w700, color: isGray ? Colors.black.withOpacity(0.6) : null)),
+          Text(amount, style: TextStyle(fontWeight: isBold ? FontWeight.w900 : FontWeight.w700, color: isBold ? color : null, fontSize: isBold ? 16 : 14)),
+        ],
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(color: Colors.black.withOpacity(0.6))),
+          Text(value, style: const TextStyle(fontWeight: FontWeight.w700)),
+        ],
+      ),
+    );
+  }
+
+  Color _getPolicyColor(String type) {
+    return switch (type) {
+      'basic' => const Color(0xFF009688),
+      'premium' => const Color(0xFFD97706),
+      'comprehensive' => const Color(0xFF7C3AED),
+      _ => const Color(0xFF0F766E),
+    };
+  }
+}

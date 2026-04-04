@@ -2,7 +2,11 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const { port } = require('./config');
+const PORT = process.env.PORT || port;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 const authRoutes = require('./routes/auth');
 const riderRoutes = require('./routes/rider');
 
@@ -23,6 +27,18 @@ app.get('/health', (_req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/rider', riderRoutes);
+
+
+app.get('/api', (req, res) => {
+  res.json({
+    message: "SurakshaRide API is running 🚀",
+    endpoints: [
+      "/api/auth",
+      "/api/rider",
+      "/health"
+    ]
+  });
+});
 
 app.use((err, _req, res, _next) => {
   console.error(err);

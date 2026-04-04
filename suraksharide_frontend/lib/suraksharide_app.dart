@@ -1,15 +1,340 @@
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart' as sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart' as sqflite_ffi;
+import 'package:xml/xml.dart' as xml;
+
+import 'url_opener_stub.dart' if (dart.library.html) 'url_opener_web.dart';
 
 enum UserRole { rider, admin }
 enum PlanId { s, m, l }
 enum Severity { low, medium, high }
 enum AuthMode { login, register }
+enum TriggerCategory { appDowntime, rainfall, extremeHeat, pollution, war, lockdown }
+
+T? _firstOrNull<T>(Iterable<T> items) {
+  if (items.isEmpty) return null;
+  return items.first;
+}
+
+class NewsTriggerCandidate {
+  final String id;
+  final String title;
+  final String source;
+  final String url;
+  final String sourcePageUrl;
+  final String suggestedLocation;
+  final DateTime publishedAt;
+  final TriggerCategory category;
+  final Severity severity;
+  final String summary;
+
+  const NewsTriggerCandidate({
+    required this.id,
+    required this.title,
+    required this.source,
+    required this.url,
+    this.sourcePageUrl = '',
+    this.suggestedLocation = 'all',
+    required this.publishedAt,
+    required this.category,
+    required this.severity,
+    required this.summary,
+  });
+}
+
+class NewsTriggerScraper {
+  static final List<String> _rssSources = [
+    'https://news.google.com/rss/search?q=platform+outage+OR+app+down+OR+server+outage&hl=en-IN&gl=IN&ceid=IN:en',
+    'https://news.google.com/rss/search?q=heavy+rainfall+OR+flood+warning&hl=en-IN&gl=IN&ceid=IN:en',
+    'https://news.google.com/rss/search?q=war+conflict+breaking&hl=en-IN&gl=IN&ceid=IN:en',
+    'https://news.google.com/rss/search?q=lockdown+curfew+government+order&hl=en-IN&gl=IN&ceid=IN:en',
+  ];
+
+  static Future<List<NewsTriggerCandidate>> fetchCandidates() async {
+    final results = <NewsTriggerCandidate>[];
+
+    for (final sourceUrl in _rssSources) {
+      try {
+        final response = await http.get(Uri.parse(sourceUrl));
+        if (response.statusCode != 200) continue;
+
+        final document = xml.XmlDocument.parse(response.body);
+        final channel = _firstOrNull(document.findAllElements('channel'));
+        final sourceName = _firstOrNull(channel?.findElements('title') ?? const <xml.XmlElement>[])?.innerText.trim() ?? 'News feed';
+
+        for (final item in document.findAllElements('item').take(8)) {
+          final title = _firstOrNull(item.findElements('title'))?.innerText.trim() ?? '';
+          final description = _firstOrNull(item.findElements('description'))?.innerText.trim() ?? '';
+          final link = _firstOrNull(item.findElements('link'))?.innerText.trim() ?? '';
+          final pubDateRaw = _firstOrNull(item.findElements('pubDate'))?.innerText.trim();
+          final combined = '${title.toLowerCase()} ${description.toLowerCase()}';
+          final category = _detectCategory(combined);
+          if (category == null) continue;
+
+          results.add(
+            NewsTriggerCandidate(
+              id: '${category.name}_${title.hashCode}_${link.hashCode}',
+              title: title.isEmpty ? _categoryLabel(category) : title,
+              source: sourceName,
+              url: link,
+              sourcePageUrl: sourceUrl,
+              suggestedLocation: 'all',
+              publishedAt: DateTime.tryParse(pubDateRaw ?? '') ?? DateTime.now(),
+              category: category,
+              severity: _severityForCategory(category),
+              summary: description.isEmpty ? 'Potential uncontrollable event from news feed.' : description,
+            ),
+          );
+        }
+      } catch (_) {
+        // Ignore source-level failures and continue with other feeds.
+      }
+    }
+
+    if (results.isEmpty) {
+      return _fallbackCandidates();
+    }
+
+    final byId = <String, NewsTriggerCandidate>{};
+    for (final candidate in results) {
+      byId[candidate.id] = candidate;
+    }
+    return byId.values.toList()
+      ..sort((a, b) => b.publishedAt.compareTo(a.publishedAt));
+  }
+
+  static TriggerCategory? _detectCategory(String text) {
+    if (text.contains('app down') || text.contains('outage') || text.contains('server down') || text.contains('service disruption')) {
+      return TriggerCategory.appDowntime;
+    }
+    if (text.contains('rainfall') || text.contains('heavy rain') || text.contains('flood') || text.contains('storm')) {
+      return TriggerCategory.rainfall;
+    }
+    if (text.contains('heatwave') || text.contains('extreme heat') || text.contains('temperature') || text.contains('hot weather')) {
+      return TriggerCategory.extremeHeat;
+    }
+    if (text.contains('aqi') || text.contains('pollution') || text.contains('smog') || text.contains('pm2.5')) {
+      return TriggerCategory.pollution;
+    }
+    if (text.contains('war') || text.contains('armed conflict') || text.contains('missile') || text.contains('air strike')) {
+      return TriggerCategory.war;
+    }
+    if (text.contains('lockdown') || text.contains('curfew') || text.contains('movement restriction')) {
+      return TriggerCategory.lockdown;
+    }
+    return null;
+  }
+
+  static Severity _severityForCategory(TriggerCategory category) {
+    return switch (category) {
+      TriggerCategory.appDowntime => Severity.high,
+      TriggerCategory.rainfall => Severity.medium,
+      TriggerCategory.extremeHeat => Severity.medium,
+      TriggerCategory.pollution => Severity.medium,
+      TriggerCategory.war => Severity.high,
+      TriggerCategory.lockdown => Severity.high,
+    };
+  }
+
+  static String _categoryLabel(TriggerCategory category) {
+    return switch (category) {
+      TriggerCategory.appDowntime => 'App downtime risk',
+      TriggerCategory.rainfall => 'Rainfall risk',
+      TriggerCategory.extremeHeat => 'Extreme heat risk',
+      TriggerCategory.pollution => 'Severe pollution risk',
+      TriggerCategory.war => 'War/conflict risk',
+      TriggerCategory.lockdown => 'Lockdown/curfew risk',
+    };
+  }
+
+  static List<NewsTriggerCandidate> _fallbackCandidates() {
+    final now = DateTime.now();
+    return [
+      NewsTriggerCandidate(
+        id: 'fallback_outage_${now.millisecondsSinceEpoch}',
+        title: 'Platform service outage reported',
+        source: 'Fallback feed',
+        url: '',
+        sourcePageUrl: '',
+        suggestedLocation: 'all',
+        publishedAt: now.subtract(const Duration(hours: 2)),
+        category: TriggerCategory.appDowntime,
+        severity: Severity.high,
+        summary: 'Multiple outage reports found. Awaiting admin validation.',
+      ),
+      NewsTriggerCandidate(
+        id: 'fallback_rain_${now.millisecondsSinceEpoch}',
+        title: 'Heavy rainfall alert issued',
+        source: 'Fallback feed',
+        url: '',
+        sourcePageUrl: '',
+        suggestedLocation: 'all',
+        publishedAt: now.subtract(const Duration(hours: 3)),
+        category: TriggerCategory.rainfall,
+        severity: Severity.medium,
+        summary: 'Heavy rain advisory published in operating zones.',
+      ),
+    ];
+  }
+}
+
+class _CityGeo {
+  final String city;
+  final double lat;
+  final double lon;
+
+  const _CityGeo(this.city, this.lat, this.lon);
+}
+
+class ExternalTriggerEngine {
+  static const List<_CityGeo> _cities = [
+    _CityGeo('Bengaluru', 12.9716, 77.5946),
+    _CityGeo('Mumbai', 19.0760, 72.8777),
+    _CityGeo('Delhi', 28.6139, 77.2090),
+  ];
+
+  static Future<List<NewsTriggerCandidate>> fetchCandidates() async {
+    final now = DateTime.now();
+    final results = <NewsTriggerCandidate>[];
+
+    for (final city in _cities) {
+      results.addAll(await _fetchWeatherAndAqi(city));
+      results.add(_mockPlatformOutage(city.city, now));
+      final curfew = _mockCurfew(city.city, now);
+      if (curfew != null) {
+        results.add(curfew);
+      }
+    }
+
+    final byId = <String, NewsTriggerCandidate>{};
+    for (final candidate in results) {
+      byId[candidate.id] = candidate;
+    }
+    return byId.values.toList()..sort((a, b) => b.publishedAt.compareTo(a.publishedAt));
+  }
+
+  static Future<List<NewsTriggerCandidate>> _fetchWeatherAndAqi(_CityGeo city) async {
+    final now = DateTime.now();
+    final list = <NewsTriggerCandidate>[];
+
+    try {
+      final weatherUrl =
+          'https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&current=temperature_2m,rain';
+      final weatherResponse = await http.get(Uri.parse(weatherUrl));
+      if (weatherResponse.statusCode == 200) {
+        final weatherJson = jsonDecode(weatherResponse.body) as Map<String, dynamic>;
+        final current = (weatherJson['current'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+        final temp = (current['temperature_2m'] as num?)?.toDouble() ?? 0;
+        final rain = (current['rain'] as num?)?.toDouble() ?? 0;
+
+        if (rain >= 8) {
+          list.add(
+            NewsTriggerCandidate(
+              id: 'wx_rain_${city.city}_${now.hour}_${now.day}',
+              title: 'Heavy rainfall risk detected in ${city.city}',
+              source: 'Open-Meteo Weather API',
+              url: weatherUrl,
+              sourcePageUrl: weatherUrl,
+              suggestedLocation: city.city,
+              publishedAt: now,
+              category: TriggerCategory.rainfall,
+              severity: Severity.high,
+              summary: 'Rain intensity is high enough to disrupt delivery operations in ${city.city}.',
+            ),
+          );
+        }
+
+        if (temp >= 40) {
+          list.add(
+            NewsTriggerCandidate(
+              id: 'wx_heat_${city.city}_${now.hour}_${now.day}',
+              title: 'Extreme heat risk detected in ${city.city}',
+              source: 'Open-Meteo Weather API',
+              url: weatherUrl,
+              sourcePageUrl: weatherUrl,
+              suggestedLocation: city.city,
+              publishedAt: now,
+              category: TriggerCategory.extremeHeat,
+              severity: Severity.medium,
+              summary: 'Temperature crossed safe outdoor threshold in ${city.city}.',
+            ),
+          );
+        }
+      }
+    } catch (_) {
+      // Continue with other sources if weather API is unavailable.
+    }
+
+    try {
+      final aqiUrl =
+          'https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${city.lat}&longitude=${city.lon}&current=us_aqi,pm2_5';
+      final aqiResponse = await http.get(Uri.parse(aqiUrl));
+      if (aqiResponse.statusCode == 200) {
+        final aqiJson = jsonDecode(aqiResponse.body) as Map<String, dynamic>;
+        final current = (aqiJson['current'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+        final usAqi = (current['us_aqi'] as num?)?.toDouble() ?? 0;
+        if (usAqi >= 180) {
+          list.add(
+            NewsTriggerCandidate(
+              id: 'aqi_${city.city}_${now.hour}_${now.day}',
+              title: 'Severe pollution risk detected in ${city.city}',
+              source: 'Open-Meteo Air Quality API',
+              url: aqiUrl,
+              sourcePageUrl: aqiUrl,
+              suggestedLocation: city.city,
+              publishedAt: now,
+              category: TriggerCategory.pollution,
+              severity: Severity.medium,
+              summary: 'AQI levels are unsafe for prolonged rider activity in ${city.city}.',
+            ),
+          );
+        }
+      }
+    } catch (_) {
+      // Continue with mock signals if AQI API is unavailable.
+    }
+
+    return list;
+  }
+
+  static NewsTriggerCandidate _mockPlatformOutage(String city, DateTime now) {
+    return NewsTriggerCandidate(
+      id: 'mock_outage_${city}_${now.hour}_${now.day}',
+      title: 'Simulated platform outage watch - $city',
+      source: 'Mock Platform Ops API',
+      url: '',
+      sourcePageUrl: 'https://www.githubstatus.com/',
+      suggestedLocation: city,
+      publishedAt: now.subtract(const Duration(minutes: 6)),
+      category: TriggerCategory.appDowntime,
+      severity: Severity.medium,
+      summary: 'Order assignment degradation detected in $city. Trigger created for admin review.',
+    );
+  }
+
+  static NewsTriggerCandidate? _mockCurfew(String city, DateTime now) {
+    if (now.hour < 21) return null;
+    return NewsTriggerCandidate(
+      id: 'mock_curfew_${city}_${now.day}',
+      title: 'Simulated late-hour curfew advisory - $city',
+      source: 'Mock Civic Alert Feed',
+      url: '',
+      sourcePageUrl: 'https://www.ndma.gov.in/',
+      suggestedLocation: city,
+      publishedAt: now,
+      category: TriggerCategory.lockdown,
+      severity: Severity.high,
+      summary: 'Late-hour movement restrictions may reduce delivery windows in $city.',
+    );
+  }
+}
 
 class AuthAccount {
   final String password;
@@ -138,8 +463,8 @@ class AppDatabase {
     final policies = [
       {
         'id': 'policy_basic',
-        'name': 'Basic Coverage',
-        'description': 'Essential protection for daily commute',
+        'name': 'Income Shield - Basic',
+        'description': 'Weekly income-loss protection for local disruptions',
         'premium_monthly': 299.0,
         'coverage_amount': 50000,
         'type': 'basic',
@@ -148,8 +473,8 @@ class AppDatabase {
       },
       {
         'id': 'policy_premium',
-        'name': 'Premium Plus',
-        'description': 'Complete coverage with enhanced benefits',
+        'name': 'Income Shield - Plus',
+        'description': 'Higher weekly income protection for high-risk zones',
         'premium_monthly': 599.0,
         'coverage_amount': 100000,
         'type': 'premium',
@@ -158,8 +483,8 @@ class AppDatabase {
       },
       {
         'id': 'policy_comprehensive',
-        'name': 'Comprehensive Shield',
-        'description': 'Maximum protection with all benefits',
+        'name': 'Income Shield - Max',
+        'description': 'Maximum weekly earnings protection for full-time riders',
         'premium_monthly': 999.0,
         'coverage_amount': 250000,
         'type': 'comprehensive',
@@ -168,8 +493,8 @@ class AppDatabase {
       },
       {
         'id': 'policy_quarterly',
-        'name': 'Quarterly Combo',
-        'description': 'Save more with 3-month coverage',
+        'name': 'Income Shield - Smart Saver',
+        'description': 'Lower weekly premium for stable riding zones',
         'premium_monthly': 549.0,
         'coverage_amount': 150000,
         'type': 'premium',
@@ -285,8 +610,8 @@ class AppDatabase {
     final policies = [
       {
         'id': 'policy_basic',
-        'name': 'Basic Coverage',
-        'description': 'Essential protection for daily commute',
+        'name': 'Income Shield - Basic',
+        'description': 'Weekly income-loss protection for local disruptions',
         'premium_monthly': 299.0,
         'coverage_amount': 50000,
         'type': 'basic',
@@ -295,8 +620,8 @@ class AppDatabase {
       },
       {
         'id': 'policy_premium',
-        'name': 'Premium Plus',
-        'description': 'Complete coverage with enhanced benefits',
+        'name': 'Income Shield - Plus',
+        'description': 'Higher weekly income protection for high-risk zones',
         'premium_monthly': 599.0,
         'coverage_amount': 100000,
         'type': 'premium',
@@ -305,8 +630,8 @@ class AppDatabase {
       },
       {
         'id': 'policy_comprehensive',
-        'name': 'Comprehensive Shield',
-        'description': 'Maximum protection with all benefits',
+        'name': 'Income Shield - Max',
+        'description': 'Maximum weekly earnings protection for full-time riders',
         'premium_monthly': 999.0,
         'coverage_amount': 250000,
         'type': 'comprehensive',
@@ -315,8 +640,8 @@ class AppDatabase {
       },
       {
         'id': 'policy_quarterly',
-        'name': 'Quarterly Combo',
-        'description': 'Save more with 3-month coverage',
+        'name': 'Income Shield - Smart Saver',
+        'description': 'Lower weekly premium for stable riding zones',
         'premium_monthly': 549.0,
         'coverage_amount': 150000,
         'type': 'premium',
@@ -393,6 +718,10 @@ class AppDatabase {
     required String password,
     required UserRole role,
   }) async {
+    if (role == UserRole.admin) {
+      return const AuthActionResult(success: false, message: 'Admin account creation is disabled. Admin can only login.');
+    }
+
     if (_useMemoryStore) {
       if (_usersMemory.containsKey(email)) {
         return const AuthActionResult(success: false, message: 'Email already registered. Please login.');
@@ -592,6 +921,10 @@ class RiskAlert {
   final String id;
   final String title;
   final String triggerDescription;
+  final String source;
+  final String sourceUrl;
+  final String sourcePageUrl;
+  final String affectedLocation;
   final Severity severity;
   final DateTime createdAt;
 
@@ -599,6 +932,10 @@ class RiskAlert {
     required this.id,
     required this.title,
     required this.triggerDescription,
+    required this.source,
+    this.sourceUrl = '',
+    this.sourcePageUrl = '',
+    this.affectedLocation = 'all',
     required this.severity,
     required this.createdAt,
   });
@@ -629,10 +966,33 @@ class FraudFlag {
   });
 }
 
+class AdminAnalyticsSnapshot {
+  final int pendingTriggers;
+  final int approvedTriggers;
+  final int criticalFraudFlags;
+  final int warningFraudFlags;
+  final int highSeverityTriggers;
+  final int sourceCount;
+  final double estimatedWeeklyExposure;
+  final Map<String, int> locationDistribution;
+
+  const AdminAnalyticsSnapshot({
+    required this.pendingTriggers,
+    required this.approvedTriggers,
+    required this.criticalFraudFlags,
+    required this.warningFraudFlags,
+    required this.highSeverityTriggers,
+    required this.sourceCount,
+    required this.estimatedWeeklyExposure,
+    required this.locationDistribution,
+  });
+}
+
 class InsurancePolicy {
   final String id;
   final String name;
   final String description;
+  final double weeklyPremium;
   final double premiumMonthly;
   final int coverageAmount;
   final List<String> coverageDetails;
@@ -643,12 +1003,13 @@ class InsurancePolicy {
     required this.id,
     required this.name,
     required this.description,
-    required this.premiumMonthly,
+    required this.weeklyPremium,
+    double? premiumMonthly,
     required this.coverageAmount,
     required this.coverageDetails,
     required this.type,
     this.isActive = false,
-  });
+  }) : premiumMonthly = premiumMonthly ?? weeklyPremium;
 }
 
 class SelectedInsurance {
@@ -665,6 +1026,58 @@ class SelectedInsurance {
   });
 }
 
+class RiderSecurityProfile {
+  final String aadhaarNumber;
+  final String operatingLocation;
+  final String workProofType;
+  final String workProofId;
+  final String upiId;
+  final String emergencyPhone;
+  final String payoutPin;
+  final bool enable2Fa;
+  final bool consentAccepted;
+  final bool isVerified;
+
+  const RiderSecurityProfile({
+    this.aadhaarNumber = '',
+    this.operatingLocation = '',
+    this.workProofType = 'Delivery ID',
+    this.workProofId = '',
+    this.upiId = '',
+    this.emergencyPhone = '',
+    this.payoutPin = '',
+    this.enable2Fa = false,
+    this.consentAccepted = false,
+    this.isVerified = false,
+  });
+
+  RiderSecurityProfile copyWith({
+    String? aadhaarNumber,
+    String? operatingLocation,
+    String? workProofType,
+    String? workProofId,
+    String? upiId,
+    String? emergencyPhone,
+    String? payoutPin,
+    bool? enable2Fa,
+    bool? consentAccepted,
+    bool? isVerified,
+  }) {
+    return RiderSecurityProfile(
+      aadhaarNumber: aadhaarNumber ?? this.aadhaarNumber,
+      operatingLocation: operatingLocation ?? this.operatingLocation,
+      workProofType: workProofType ?? this.workProofType,
+      workProofId: workProofId ?? this.workProofId,
+      upiId: upiId ?? this.upiId,
+      emergencyPhone: emergencyPhone ?? this.emergencyPhone,
+      payoutPin: payoutPin ?? this.payoutPin,
+      enable2Fa: enable2Fa ?? this.enable2Fa,
+      consentAccepted: consentAccepted ?? this.consentAccepted,
+      isVerified: isVerified ?? this.isVerified,
+    );
+  }
+}
+
 double _clamp01(double value) => value.clamp(0.0, 1.0);
 
 String inrInt(int value) => '₹${value.toString()}';
@@ -672,6 +1085,119 @@ String inrAmt(double value) => '₹${value.toStringAsFixed(0)}';
 
 String formatDate(DateTime date) {
   return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
+}
+
+String _normalizeLocation(String value) {
+  final lowered = value.trim().toLowerCase();
+  if (lowered.isEmpty) return '';
+  if (lowered == 'all' || lowered == 'all locations' || lowered == 'any' || lowered == 'pan india' || lowered == 'nationwide') {
+    return 'all';
+  }
+  return lowered;
+}
+
+bool isAlertRelevantForLocation(RiskAlert alert, String riderLocation) {
+  final alertLocation = _normalizeLocation(alert.affectedLocation);
+  if (alertLocation.isEmpty || alertLocation == 'all') return true;
+
+  final rider = _normalizeLocation(riderLocation);
+  if (rider.isEmpty) return false;
+
+  return rider.contains(alertLocation) || alertLocation.contains(rider);
+}
+
+String alertTriggerSource(RiskAlert alert) {
+  final area = _normalizeLocation(alert.affectedLocation) == 'all' || alert.affectedLocation.trim().isEmpty
+      ? 'All locations'
+      : alert.affectedLocation;
+  if (alert.sourceUrl.isNotEmpty) {
+    return 'Source: ${alert.source} • Affected area: $area • ${alert.sourceUrl}';
+  }
+  return 'Source: ${alert.source} • Affected area: $area';
+}
+
+String alertCorrectionTip(RiskAlert alert) {
+  return 'If you think this is incorrect, contact support from Help and request a trigger review.';
+}
+
+String riderAlertLabel(RiskAlert alert) {
+  return switch (alert.id) {
+    'rain' => 'Earnings Risk Window A',
+    'heat' => 'Earnings Risk Window B',
+    'aqi' => 'Earnings Risk Window C',
+    'outage' => 'Earnings Risk Window D',
+    _ => 'Earnings Risk Window',
+  };
+}
+
+bool isOpenableUrl(String url) {
+  final value = url.trim();
+  if (value.isEmpty) return false;
+
+  final uri = Uri.tryParse(value);
+  if (uri == null) return false;
+
+  final hasWebScheme = uri.scheme == 'http' || uri.scheme == 'https';
+  if (!hasWebScheme) return false;
+  if (uri.host.isEmpty) return false;
+
+  final host = uri.host.toLowerCase();
+  if (host.contains('example.com') || host == 'localhost') return false;
+  return true;
+}
+
+String _searchUrl(String query) {
+  return 'https://www.google.com/search?q=${Uri.encodeQueryComponent(query)}';
+}
+
+String bestCandidateSourcePageUrl(NewsTriggerCandidate candidate) {
+  if (isOpenableUrl(candidate.sourcePageUrl)) return candidate.sourcePageUrl;
+  if (isOpenableUrl(candidate.url)) return candidate.url;
+  return _searchUrl('${candidate.source} ${candidate.title} ${candidate.suggestedLocation}');
+}
+
+String bestCandidateArticleUrl(NewsTriggerCandidate candidate) {
+  if (isOpenableUrl(candidate.url)) return candidate.url;
+  return _searchUrl('${candidate.title} ${candidate.source}');
+}
+
+String bestAlertSourcePageUrl(RiskAlert alert) {
+  if (isOpenableUrl(alert.sourcePageUrl)) return alert.sourcePageUrl;
+  if (isOpenableUrl(alert.sourceUrl)) return alert.sourceUrl;
+  return _searchUrl('${alert.source} ${alert.title} ${alert.affectedLocation}');
+}
+
+String bestAlertArticleUrl(RiskAlert alert) {
+  if (isOpenableUrl(alert.sourceUrl)) return alert.sourceUrl;
+  return _searchUrl('${alert.title} ${alert.source}');
+}
+
+Future<void> openSourceLink(BuildContext context, String sourceUrl) async {
+  var normalized = sourceUrl.trim();
+  if (normalized.isEmpty) return;
+
+  final hasScheme = RegExp(r'^https?://', caseSensitive: false).hasMatch(normalized);
+  if (!hasScheme) {
+    normalized = 'https://$normalized';
+  }
+
+  final uri = Uri.tryParse(normalized);
+  if (uri == null || !uri.hasScheme) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Invalid source URL.')),
+    );
+    return;
+  }
+
+  final encoded = uri.toString();
+  final opened = await openExternalUrl(encoded);
+
+  if (!opened && context.mounted) {
+    await Clipboard.setData(ClipboardData(text: encoded));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Could not open link directly. URL copied to clipboard.')),
+    );
+  }
 }
 
 double _severityToRisk(Severity severity) {
@@ -705,6 +1231,10 @@ class _SurakshaRideAppState extends State<SurakshaRideApp> {
   AuthUser? _user;
   PlanId _selectedPlan = PlanId.s;
   late Future<void> _dbInitFuture;
+  final List<NewsTriggerCandidate> _pendingNewsTriggers = [];
+  final List<RiskAlert> _approvedAlerts = [];
+  final List<FraudFlag> _fraudFlags = [];
+  bool? _isFetchingNewsTriggers = false;
 
   @override
   void initState() {
@@ -726,6 +1256,76 @@ class _SurakshaRideAppState extends State<SurakshaRideApp> {
       setState(() => _user = AuthUser(email: email, role: role));
     }
     return result;
+  }
+
+  Future<void> _fetchNewsTriggers() async {
+    if ((_isFetchingNewsTriggers ?? false)) return;
+    setState(() => _isFetchingNewsTriggers = true);
+
+    final fetchedNews = await NewsTriggerScraper.fetchCandidates();
+    final fetchedExternal = await ExternalTriggerEngine.fetchCandidates();
+    final fetched = [...fetchedNews, ...fetchedExternal];
+    final existingIds = _pendingNewsTriggers.map((e) => e.id).toSet();
+    final approvedIds = _approvedAlerts.map((e) => e.id).toSet();
+
+    final newOnes = fetched.where((candidate) {
+      final adminAlertId = 'approved_${candidate.id}';
+      return !existingIds.contains(candidate.id) && !approvedIds.contains(adminAlertId);
+    });
+
+    setState(() {
+      _pendingNewsTriggers.insertAll(0, newOnes);
+      _isFetchingNewsTriggers = false;
+    });
+  }
+
+  void _approveNewsTrigger(String triggerId, String affectedLocation) {
+    final index = _pendingNewsTriggers.indexWhere((e) => e.id == triggerId);
+    if (index == -1) return;
+    final candidate = _pendingNewsTriggers.removeAt(index);
+    final normalizedLocation = _normalizeLocation(affectedLocation);
+
+    final alert = RiskAlert(
+      id: 'approved_${candidate.id}',
+      title: _adminCategoryLabel(candidate.category),
+      triggerDescription: candidate.summary,
+      source: candidate.source,
+      sourceUrl: candidate.url,
+      sourcePageUrl: candidate.sourcePageUrl,
+      affectedLocation: normalizedLocation.isEmpty ? 'all' : affectedLocation.trim(),
+      severity: candidate.severity,
+      createdAt: DateTime.now(),
+    );
+
+    setState(() {
+      _approvedAlerts.insert(0, alert);
+    });
+  }
+
+  void _rejectNewsTrigger(String triggerId) {
+    setState(() {
+      _pendingNewsTriggers.removeWhere((e) => e.id == triggerId);
+    });
+  }
+
+  void _recordFraudFlag(FraudFlag flag) {
+    setState(() {
+      final exists = _fraudFlags.any((f) => f.id == flag.id);
+      if (!exists) {
+        _fraudFlags.insert(0, flag);
+      }
+    });
+  }
+
+  String _adminCategoryLabel(TriggerCategory category) {
+    return switch (category) {
+      TriggerCategory.appDowntime => 'App downtime event',
+      TriggerCategory.rainfall => 'Rainfall disruption event',
+      TriggerCategory.extremeHeat => 'Extreme heat disruption event',
+      TriggerCategory.pollution => 'Severe pollution disruption event',
+      TriggerCategory.war => 'War/conflict event',
+      TriggerCategory.lockdown => 'Lockdown/curfew event',
+    };
   }
 
   @override
@@ -784,12 +1384,21 @@ class _SurakshaRideAppState extends State<SurakshaRideApp> {
                 ? RiderHome(
                     user: _user!,
                     planId: _selectedPlan,
+                    approvedAlerts: _approvedAlerts,
+                    onFraudFlagGenerated: _recordFraudFlag,
                     onPlanChanged: (newPlan) => setState(() => _selectedPlan = newPlan),
                     onSignOut: () => setState(() => _user = null),
                   )
                 : AdminHome(
                     user: _user!,
                     planIdHint: _selectedPlan,
+                    pendingNewsTriggers: _pendingNewsTriggers,
+                    approvedAlerts: _approvedAlerts,
+                    fraudFlags: _fraudFlags,
+                    isFetchingNewsTriggers: _isFetchingNewsTriggers ?? false,
+                    onFetchNewsTriggers: _fetchNewsTriggers,
+                    onApproveNewsTrigger: _approveNewsTrigger,
+                    onRejectNewsTrigger: _rejectNewsTrigger,
                     onSignOut: () => setState(() => _user = null),
                   );
           },
@@ -832,6 +1441,7 @@ class _LoginPageState extends State<LoginPage> {
     final email = _email.text.trim().toLowerCase();
     final pass = _password.text;
     final confirm = _confirmPassword.text;
+    final effectiveRole = _mode == AuthMode.register ? UserRole.rider : _role;
 
     if (email.isEmpty || !email.contains('@')) {
       setState(() {
@@ -864,8 +1474,8 @@ class _LoginPageState extends State<LoginPage> {
     });
 
     final result = await (_mode == AuthMode.login
-        ? widget.onLogin(email: email, password: pass, role: _role)
-        : widget.onRegister(email: email, password: pass, role: _role));
+      ? widget.onLogin(email: email, password: pass, role: effectiveRole)
+      : widget.onRegister(email: email, password: pass, role: effectiveRole));
 
     if (!mounted) return;
 
@@ -926,37 +1536,86 @@ class _LoginPageState extends State<LoginPage> {
             children: [
               Text(_mode == AuthMode.login ? 'Login' : 'Register', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
               const SizedBox(height: 8),
-              Text(_mode == AuthMode.login ? 'Login as rider or admin.' : 'Create a rider or admin account.'),
+              Text(_role == UserRole.admin ? 'Admin can only login.' : (_mode == AuthMode.login ? 'Login as rider or admin.' : 'Create a rider account.')),
               const SizedBox(height: 16),
-              SegmentedButton<AuthMode>(
-                segments: const [
-                  ButtonSegment(value: AuthMode.login, label: Text('Login'), icon: Icon(Icons.login_outlined)),
-                  ButtonSegment(value: AuthMode.register, label: Text('Register'), icon: Icon(Icons.app_registration_outlined)),
-                ],
-                selected: {_mode},
-                onSelectionChanged: (value) {
-                  setState(() {
-                    _mode = value.first;
-                    _error = null;
-                    _success = null;
-                  });
-                },
-              ),
+              if (_role == UserRole.admin)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF0F766E).withOpacity(0.25)),
+                    color: const Color(0xFF0F766E).withOpacity(0.08),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.admin_panel_settings_outlined, size: 18),
+                      SizedBox(width: 8),
+                      Text('Admin login only', style: TextStyle(fontWeight: FontWeight.w700)),
+                    ],
+                  ),
+                )
+              else
+                SegmentedButton<AuthMode>(
+                  segments: const [
+                    ButtonSegment(value: AuthMode.login, label: Text('Login'), icon: Icon(Icons.login_outlined)),
+                    ButtonSegment(value: AuthMode.register, label: Text('Register'), icon: Icon(Icons.app_registration_outlined)),
+                  ],
+                  selected: {_mode},
+                  onSelectionChanged: (value) {
+                    setState(() {
+                      _mode = value.first;
+                      if (_mode == AuthMode.register) {
+                        _role = UserRole.rider;
+                      }
+                      _error = null;
+                      _success = null;
+                    });
+                  },
+                ),
               const SizedBox(height: 16),
-              SegmentedButton<UserRole>(
-                segments: const [
-                  ButtonSegment(value: UserRole.rider, label: Text('Rider'), icon: Icon(Icons.directions_bike_outlined)),
-                  ButtonSegment(value: UserRole.admin, label: Text('Admin'), icon: Icon(Icons.admin_panel_settings_outlined)),
-                ],
-                selected: {_role},
-                onSelectionChanged: (value) {
-                  setState(() {
-                    _role = value.first;
-                    _error = null;
-                    _success = null;
-                  });
-                },
-              ),
+              if (_mode == AuthMode.login)
+                SegmentedButton<UserRole>(
+                  segments: const [
+                    ButtonSegment(value: UserRole.rider, label: Text('Rider'), icon: Icon(Icons.directions_bike_outlined)),
+                    ButtonSegment(value: UserRole.admin, label: Text('Admin'), icon: Icon(Icons.admin_panel_settings_outlined)),
+                  ],
+                  selected: {_role},
+                  onSelectionChanged: (value) {
+                    setState(() {
+                      _role = value.first;
+                      if (_role == UserRole.admin) {
+                        _mode = AuthMode.login;
+                      }
+                      _error = null;
+                      _success = null;
+                    });
+                  },
+                )
+              else
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF0F766E).withOpacity(0.25)),
+                    color: const Color(0xFF0F766E).withOpacity(0.08),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.directions_bike_outlined, size: 18),
+                      SizedBox(width: 8),
+                      Text('Registering as Rider', style: TextStyle(fontWeight: FontWeight.w700)),
+                    ],
+                  ),
+                ),
+              if (_mode == AuthMode.register)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Admin accounts are managed internally and can only login.',
+                    style: TextStyle(color: Colors.black.withOpacity(0.62), fontSize: 12),
+                  ),
+                ),
               const SizedBox(height: 16),
               TextField(
                 controller: _email,
@@ -1095,6 +1754,8 @@ class _HeroChip extends StatelessWidget {
 class RiderHome extends StatefulWidget {
   final AuthUser user;
   final PlanId planId;
+  final List<RiskAlert>? approvedAlerts;
+  final ValueChanged<FraudFlag>? onFraudFlagGenerated;
   final ValueChanged<PlanId> onPlanChanged;
   final VoidCallback onSignOut;
 
@@ -1102,6 +1763,8 @@ class RiderHome extends StatefulWidget {
     super.key,
     required this.user,
     required this.planId,
+    this.approvedAlerts,
+    this.onFraudFlagGenerated,
     required this.onPlanChanged,
     required this.onSignOut,
   });
@@ -1117,14 +1780,19 @@ class _RiderHomeState extends State<RiderHome> {
   late List<RiskAlert> _alerts;
   final List<Payout> _payouts = [];
   final Set<String> _simulatedAlertIds = {};
+  final Set<String> _autoProcessedAlertIds = {};
+  final Set<String> _reviewRequiredAlertIds = {};
   late List<InsurancePolicy> _insurancePolicies;
   late SelectedInsurance? _selectedInsurance;
+  RiderSecurityProfile _securityProfile = const RiderSecurityProfile();
 
   @override
   void initState() {
     super.initState();
     _selectedPlan = widget.planId;
-    _alerts = _buildAlerts();
+    _alerts = const <RiskAlert>[];
+    _refreshLocationFilteredAlerts();
+    _autoProcessAlertsIfEligible();
     _insurancePolicies = _buildInsurancePolicies();
     _selectedInsurance = null;
     _loadPersistedInsuranceSelection();
@@ -1135,56 +1803,148 @@ class _RiderHomeState extends State<RiderHome> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.planId != widget.planId) {
       _selectedPlan = widget.planId;
-      _alerts = _buildAlerts();
+    }
+    _refreshLocationFilteredAlerts();
+    _autoProcessAlertsIfEligible();
+  }
+
+  void _refreshLocationFilteredAlerts() {
+    final incoming = [...(widget.approvedAlerts ?? const <RiskAlert>[])];
+    _alerts = incoming.where((alert) => isAlertRelevantForLocation(alert, _securityProfile.operatingLocation)).toList();
+  }
+
+  void _autoProcessAlertsIfEligible() {
+    if (!_securityProfile.isVerified) return;
+
+    bool changed = false;
+    for (final alert in _alerts) {
+      if (_autoProcessedAlertIds.contains(alert.id) || _simulatedAlertIds.contains(alert.id)) {
+        continue;
+      }
+
+      final amount = computePotentialPayout(planId: _selectedPlan, alert: alert);
+      final fraudAssessment = _assessFraudRisk(alert: alert, payoutAmount: amount);
+
+      if (fraudAssessment.score >= 0.72) {
+        _reviewRequiredAlertIds.add(alert.id);
+        widget.onFraudFlagGenerated?.call(
+          FraudFlag(
+            id: 'fraud_${widget.user.email}_${alert.id}',
+            riderEmail: widget.user.email,
+            score: fraudAssessment.score,
+            reasons: fraudAssessment.reasons,
+            createdAt: DateTime.now(),
+          ),
+        );
+        changed = true;
+        continue;
+      }
+
+      if (fraudAssessment.score >= 0.45) {
+        widget.onFraudFlagGenerated?.call(
+          FraudFlag(
+            id: 'fraud_warn_${widget.user.email}_${alert.id}',
+            riderEmail: widget.user.email,
+            score: fraudAssessment.score,
+            reasons: fraudAssessment.reasons,
+            createdAt: DateTime.now(),
+          ),
+        );
+      }
+
+      _autoProcessedAlertIds.add(alert.id);
+      _simulatedAlertIds.add(alert.id);
+      _walletBalance += amount;
+      _payouts.insert(
+        0,
+        Payout(
+          id: 'ap_${alert.id}',
+          reason: 'Auto payout: ${alert.title}',
+          date: DateTime.now(),
+          amount: amount,
+        ),
+      );
+      changed = true;
+    }
+
+    if (changed && mounted) {
+      setState(() {});
     }
   }
 
-  List<RiskAlert> _buildAlerts() {
+  ({double score, List<String> reasons}) _assessFraudRisk({
+    required RiskAlert alert,
+    required double payoutAmount,
+  }) {
+    var score = 0.08;
+    final reasons = <String>[];
     final now = DateTime.now();
-    return [
-      RiskAlert(id: 'rain', title: 'Rainfall spike', triggerDescription: 'Rainfall >= 50 mm in 24 hours', severity: Severity.high, createdAt: now.subtract(const Duration(hours: 6))),
-      RiskAlert(id: 'heat', title: 'Extreme heat', triggerDescription: 'Temperature >= 42°C', severity: Severity.medium, createdAt: now.subtract(const Duration(hours: 12))),
-      RiskAlert(id: 'aqi', title: 'AQI escalation', triggerDescription: 'AQI >= 300 for extended duration', severity: Severity.medium, createdAt: now.subtract(const Duration(days: 1))),
-      RiskAlert(id: 'outage', title: 'Platform outage', triggerDescription: 'Platform downtime >= 30 minutes during peak hours', severity: Severity.high, createdAt: now.subtract(const Duration(days: 2))),
-    ];
+    final recentPayouts = _payouts.where((p) => now.difference(p.date) <= const Duration(hours: 24)).length;
+
+    if (_securityProfile.operatingLocation.trim().isEmpty) {
+      score += 0.30;
+      reasons.add('Missing verified operating location');
+    }
+    if (!_securityProfile.enable2Fa) {
+      score += 0.14;
+      reasons.add('2FA disabled on payout profile');
+    }
+    if ((_securityProfile.workProofId.trim()).length < 6) {
+      score += 0.10;
+      reasons.add('Weak work-proof identifier');
+    }
+    if (alert.affectedLocation.trim().toLowerCase() == 'all') {
+      score += 0.18;
+      reasons.add('Broad geofence trigger (all locations)');
+    }
+    if (recentPayouts >= 2) {
+      score += 0.24;
+      reasons.add('Multiple payouts within 24h window');
+    }
+    if (payoutAmount > (_selectedPlan.weeklyCoverage * 0.70)) {
+      score += 0.20;
+      reasons.add('High payout amount near weekly cap');
+    }
+
+    return (score: score.clamp(0.0, 1.0), reasons: reasons.isEmpty ? const ['No anomaly signals'] : reasons);
   }
 
   List<InsurancePolicy> _buildInsurancePolicies() {
     return [
       InsurancePolicy(
         id: 'policy_basic',
-        name: 'Basic Coverage',
-        description: 'Essential protection for daily commute',
-        premiumMonthly: 299,
+        name: 'Income Shield - Basic',
+        description: 'Weekly income-loss protection for local disruptions',
+        weeklyPremium: 299,
         coverageAmount: 50000,
-        coverageDetails: ['Accident coverage up to ₹50,000', 'Basic medical benefits', '24/7 customer support', 'Valid for 1 month'],
+        coverageDetails: ['Income loss cover up to ₹50,000 per week', 'Rain and local disruption trigger protection', 'Auto payout on approved trigger', 'Valid for 7 days'],
         type: 'basic',
       ),
       InsurancePolicy(
         id: 'policy_premium',
-        name: 'Premium Plus',
-        description: 'Complete coverage with enhanced benefits',
-        premiumMonthly: 599,
+        name: 'Income Shield - Plus',
+        description: 'Higher weekly income protection for high-risk zones',
+        weeklyPremium: 599,
         coverageAmount: 100000,
-        coverageDetails: ['Accident coverage up to ₹100,000', 'Comprehensive medical benefits', 'Disability coverage', 'Free ambulance service', '24/7 priority support', 'Valid for 1 month'],
+        coverageDetails: ['Income loss cover up to ₹100,000 per week', 'Rain, outage, and curfew trigger protection', 'Faster auto payout priority', 'Daily trigger monitoring', 'Weekly validity (auto renewable)', '24/7 support'],
         type: 'premium',
       ),
       InsurancePolicy(
         id: 'policy_comprehensive',
-        name: 'Comprehensive Shield',
-        description: 'Maximum protection with all benefits',
-        premiumMonthly: 999,
+        name: 'Income Shield - Max',
+        description: 'Maximum weekly earnings protection for full-time riders',
+        weeklyPremium: 999,
         coverageAmount: 250000,
-        coverageDetails: ['Accident coverage up to ₹250,000', 'Full medical & hospitalization', 'Disability & loss of income', 'Free ambulance service', 'Personal accident coverage', 'Legal liability coverage', '24/7 premium support', 'Valid for 1 month'],
+        coverageDetails: ['Income loss cover up to ₹250,000 per week', 'All disruption triggers including severe pollution', 'Priority trigger validation window', 'Instant payout routing on approval', 'Weekly risk recalibration', 'Dedicated support'],
         type: 'comprehensive',
       ),
       InsurancePolicy(
         id: 'policy_quarterly',
-        name: 'Quarterly Combo',
-        description: 'Save more with 3-month coverage',
-        premiumMonthly: 549,
+        name: 'Income Shield - Smart Saver',
+        description: 'Lower weekly premium for stable riding zones',
+        weeklyPremium: 549,
         coverageAmount: 150000,
-        coverageDetails: ['Accident coverage up to ₹150,000', 'Complete medical benefits', '25% savings vs monthly', '3-month validity', 'Free claim processing'],
+        coverageDetails: ['Income loss cover up to ₹150,000 per week', 'Focused weather and closure trigger cover', 'Optimized weekly pricing', 'Valid for 7 days', 'Auto-renew support'],
         type: 'premium',
       ),
     ];
@@ -1216,7 +1976,7 @@ class _RiderHomeState extends State<RiderHome> {
     final selected = SelectedInsurance(policy: policy, startDate: DateTime.now());
     setState(() {
       _selectedInsurance = selected;
-      _tabIndex = 6;
+      _tabIndex = 5;
     });
 
     await AppDatabase.instance.createOrReplaceSelectedPolicy(
@@ -1237,7 +1997,7 @@ class _RiderHomeState extends State<RiderHome> {
     await AppDatabase.instance.activateSelectedPolicyAndRecordPayment(
       userEmail: widget.user.email,
       policyId: selected.policy.id,
-      premiumAmount: selected.policy.premiumMonthly,
+      premiumAmount: selected.policy.weeklyPremium,
       gstAmount: gstAmount,
       totalAmount: totalAmount,
       paymentMethod: paymentMethod,
@@ -1261,20 +2021,15 @@ class _RiderHomeState extends State<RiderHome> {
     );
   }
 
-  void _simulatePayout(RiskAlert alert) {
-    if (_simulatedAlertIds.contains(alert.id)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('This trigger was already simulated.')));
-      return;
-    }
-
-    final amount = computePotentialPayout(planId: _selectedPlan, alert: alert);
+  void _saveSecurityProfile(RiderSecurityProfile profile) {
     setState(() {
-      _simulatedAlertIds.add(alert.id);
-      _walletBalance += amount;
-      _payouts.insert(0, Payout(id: 'p_${alert.id}', reason: alert.title, date: DateTime.now(), amount: amount));
+      _securityProfile = profile;
+      _refreshLocationFilteredAlerts();
     });
-
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payout credited: ${inrAmt(amount)}')));
+    _autoProcessAlertsIfEligible();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('KYC, location, and security details saved.')),
+    );
   }
 
   @override
@@ -1286,24 +2041,30 @@ class _RiderHomeState extends State<RiderHome> {
         walletBalance: _walletBalance,
         alerts: _alerts,
         payouts: _payouts,
+        securityProfile: _securityProfile,
+        onSecurityProfileSaved: _saveSecurityProfile,
         onGoToAlerts: () => setState(() => _tabIndex = 3),
-        onGoToInsurance: () => setState(() => _tabIndex = 5),
-        onGoToPayment: () => setState(() => _tabIndex = 6),
+        onGoToInsurance: () => setState(() => _tabIndex = 2),
+        onGoToPayment: () => setState(() => _tabIndex = 5),
       ),
       RiderWalletPage(planId: _selectedPlan, walletBalance: _walletBalance, payouts: _payouts, onGoToPlans: () => setState(() => _tabIndex = 2)),
-      RiderPricingPage(planId: _selectedPlan, onPlanSelected: (plan) {
-        setState(() => _selectedPlan = plan);
-        widget.onPlanChanged(plan);
-      }),
-      RiderAlertsPage(planId: _selectedPlan, alerts: _alerts, simulatedAlertIds: _simulatedAlertIds, onSimulatePayout: _simulatePayout),
-      RiderInsightsPage(planId: _selectedPlan),
-      InsurancePolicyPage(
+      RiderCoveragePage(
+        planId: _selectedPlan,
+        onPlanSelected: (plan) {
+          setState(() => _selectedPlan = plan);
+          widget.onPlanChanged(plan);
+        },
         policies: _insurancePolicies,
         selectedInsurance: _selectedInsurance,
-        onPolicySelected: (policy) {
-          _handlePolicySelection(policy);
-        },
+        onPolicySelected: _handlePolicySelection,
       ),
+      RiderAlertsPage(
+        planId: _selectedPlan,
+        alerts: _alerts,
+        simulatedAlertIds: _simulatedAlertIds,
+        reviewRequiredAlertIds: _reviewRequiredAlertIds,
+      ),
+      RiderInsightsPage(planId: _selectedPlan),
       InsurancePaymentPage(
         selectedInsurance: _selectedInsurance,
         walletBalance: _walletBalance,
@@ -1327,10 +2088,9 @@ class _RiderHomeState extends State<RiderHome> {
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.dashboard_outlined), label: 'Dashboard'),
           BottomNavigationBarItem(icon: Icon(Icons.wallet_outlined), label: 'Wallet'),
-          BottomNavigationBarItem(icon: Icon(Icons.card_membership_outlined), label: 'Plans'),
+          BottomNavigationBarItem(icon: Icon(Icons.shield_outlined), label: 'Coverage'),
           BottomNavigationBarItem(icon: Icon(Icons.notifications_outlined), label: 'Alerts'),
           BottomNavigationBarItem(icon: Icon(Icons.insights_outlined), label: 'Insights'),
-          BottomNavigationBarItem(icon: Icon(Icons.security_outlined), label: 'Insurance'),
           BottomNavigationBarItem(icon: Icon(Icons.payment_outlined), label: 'Payment'),
         ],
       ),
@@ -1344,6 +2104,8 @@ class RiderDashboardPage extends StatelessWidget {
   final double walletBalance;
   final List<RiskAlert> alerts;
   final List<Payout> payouts;
+  final RiderSecurityProfile securityProfile;
+  final ValueChanged<RiderSecurityProfile> onSecurityProfileSaved;
   final VoidCallback onGoToAlerts;
   final VoidCallback onGoToInsurance;
   final VoidCallback onGoToPayment;
@@ -1355,6 +2117,8 @@ class RiderDashboardPage extends StatelessWidget {
     required this.walletBalance,
     required this.alerts,
     required this.payouts,
+    required this.securityProfile,
+    required this.onSecurityProfileSaved,
     required this.onGoToAlerts,
     required this.onGoToInsurance,
     required this.onGoToPayment,
@@ -1486,6 +2250,12 @@ class RiderDashboardPage extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 16),
+        RiderKycSecurityCard(
+          initialProfile: securityProfile,
+          accent: planId.accent,
+          onSaved: onSecurityProfileSaved,
+        ),
+        const SizedBox(height: 16),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(18),
@@ -1525,7 +2295,7 @@ class RiderDashboardPage extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Active Trigger Windows', style: TextStyle(fontWeight: FontWeight.w900)),
+                const Text('Active Payout Review Windows', style: TextStyle(fontWeight: FontWeight.w900)),
                 const SizedBox(height: 8),
                 if (topAlerts.isEmpty)
                   const Text('No active trigger windows right now.')
@@ -1542,9 +2312,27 @@ class RiderDashboardPage extends StatelessWidget {
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(alert.title, style: const TextStyle(fontWeight: FontWeight.w800)),
+                                    Text(riderAlertLabel(alert), style: const TextStyle(fontWeight: FontWeight.w800)),
                                     const SizedBox(height: 2),
-                                    Text(alert.triggerDescription, style: TextStyle(color: Colors.black.withOpacity(0.62), fontSize: 12)),
+                                    Text(alertTriggerSource(alert), style: TextStyle(color: Colors.black.withOpacity(0.70), fontSize: 12, fontWeight: FontWeight.w600)),
+                                    TextButton.icon(
+                                      onPressed: () => openSourceLink(context, bestAlertSourcePageUrl(alert)),
+                                      icon: const Icon(Icons.link, size: 16),
+                                      label: const Text('Open source page'),
+                                      style: TextButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                                      ),
+                                    ),
+                                    TextButton.icon(
+                                      onPressed: () => openSourceLink(context, bestAlertArticleUrl(alert)),
+                                      icon: const Icon(Icons.open_in_new, size: 16),
+                                      label: const Text('Open source'),
+                                      style: TextButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(alertCorrectionTip(alert), style: TextStyle(color: Colors.black.withOpacity(0.55), fontSize: 12, fontStyle: FontStyle.italic)),
                                   ],
                                 ),
                               ),
@@ -1630,6 +2418,264 @@ class _StatCard extends StatelessWidget {
   }
 }
 
+class RiderKycSecurityCard extends StatefulWidget {
+  final RiderSecurityProfile initialProfile;
+  final Color accent;
+  final ValueChanged<RiderSecurityProfile> onSaved;
+
+  const RiderKycSecurityCard({
+    super.key,
+    required this.initialProfile,
+    required this.accent,
+    required this.onSaved,
+  });
+
+  @override
+  State<RiderKycSecurityCard> createState() => _RiderKycSecurityCardState();
+}
+
+class _RiderKycSecurityCardState extends State<RiderKycSecurityCard> {
+  late final TextEditingController _aadhaar;
+  TextEditingController? _operatingLocation;
+  late final TextEditingController _workProofId;
+  late final TextEditingController _upiId;
+  late final TextEditingController _emergencyPhone;
+  late final TextEditingController _payoutPin;
+  late String _workProofType;
+  late bool _enable2Fa;
+  late bool _consentAccepted;
+  String? _error;
+
+  TextEditingController get _operatingLocationCtrl {
+    return _operatingLocation ??= TextEditingController(text: widget.initialProfile.operatingLocation);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _aadhaar = TextEditingController(text: widget.initialProfile.aadhaarNumber);
+    _operatingLocation = TextEditingController(text: widget.initialProfile.operatingLocation);
+    _workProofId = TextEditingController(text: widget.initialProfile.workProofId);
+    _upiId = TextEditingController(text: widget.initialProfile.upiId);
+    _emergencyPhone = TextEditingController(text: widget.initialProfile.emergencyPhone);
+    _payoutPin = TextEditingController(text: widget.initialProfile.payoutPin);
+    _workProofType = widget.initialProfile.workProofType;
+    _enable2Fa = widget.initialProfile.enable2Fa;
+    _consentAccepted = widget.initialProfile.consentAccepted;
+  }
+
+  @override
+  void dispose() {
+    _aadhaar.dispose();
+    _operatingLocation?.dispose();
+    _workProofId.dispose();
+    _upiId.dispose();
+    _emergencyPhone.dispose();
+    _payoutPin.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final aadhaar = _aadhaar.text.trim();
+    final operatingLocation = _operatingLocationCtrl.text.trim();
+    final workProofId = _workProofId.text.trim();
+    final upi = _upiId.text.trim();
+    final emergencyPhone = _emergencyPhone.text.trim();
+    final payoutPin = _payoutPin.text.trim();
+
+    final aadhaarValid = RegExp(r'^\d{12}$').hasMatch(aadhaar);
+    final upiValid = RegExp(r'^[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}$').hasMatch(upi);
+    final phoneValid = RegExp(r'^\d{10}$').hasMatch(emergencyPhone);
+    final pinValid = RegExp(r'^\d{4}$').hasMatch(payoutPin);
+
+    if (!aadhaarValid) {
+      setState(() => _error = 'Aadhaar must be exactly 12 digits.');
+      return;
+    }
+    if (operatingLocation.length < 2) {
+      setState(() => _error = 'Please enter your operating location (city/zone).');
+      return;
+    }
+    if (workProofId.isEmpty) {
+      setState(() => _error = 'Work proof ID is required.');
+      return;
+    }
+    if (!upiValid) {
+      setState(() => _error = 'Enter a valid UPI ID (example: name@bank).');
+      return;
+    }
+    if (!phoneValid) {
+      setState(() => _error = 'Emergency contact must be 10 digits.');
+      return;
+    }
+    if (!pinValid) {
+      setState(() => _error = 'Payout PIN must be 4 digits.');
+      return;
+    }
+    if (!_consentAccepted) {
+      setState(() => _error = 'Please accept security and KYC consent.');
+      return;
+    }
+
+    setState(() => _error = null);
+    widget.onSaved(
+      RiderSecurityProfile(
+        aadhaarNumber: aadhaar,
+        operatingLocation: operatingLocation,
+        workProofType: _workProofType,
+        workProofId: workProofId,
+        upiId: upi,
+        emergencyPhone: emergencyPhone,
+        payoutPin: payoutPin,
+        enable2Fa: _enable2Fa,
+        consentAccepted: _consentAccepted,
+        isVerified: true,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final verified = widget.initialProfile.isVerified;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.verified_user_outlined),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('KYC, Work Proof & Payout Security', style: TextStyle(fontWeight: FontWeight.w900)),
+                ),
+                Chip(
+                  label: Text(verified ? 'Verified' : 'Pending'),
+                  backgroundColor: (verified ? Colors.green : Colors.orange).withOpacity(0.12),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Required for policy activation and secure payout processing.',
+              style: TextStyle(color: Colors.black.withOpacity(0.65)),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _aadhaar,
+              keyboardType: TextInputType.number,
+              maxLength: 12,
+              decoration: const InputDecoration(
+                labelText: 'Aadhaar Number',
+                hintText: '12-digit Aadhaar',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.badge_outlined),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _operatingLocationCtrl,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                labelText: 'Operating Location',
+                hintText: 'City / Area where you ride',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.location_on_outlined),
+              ),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              value: _workProofType,
+              decoration: const InputDecoration(
+                labelText: 'Work Proof Type',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.work_outline),
+              ),
+              items: const [
+                DropdownMenuItem(value: 'Delivery ID', child: Text('Delivery ID Card')),
+                DropdownMenuItem(value: 'Company Letter', child: Text('Company Letter')),
+                DropdownMenuItem(value: 'Offer Letter', child: Text('Offer/Joining Letter')),
+                DropdownMenuItem(value: 'Platform Screenshot', child: Text('Platform App Profile Screenshot')),
+              ],
+              onChanged: (value) => setState(() => _workProofType = value ?? 'Delivery ID'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _workProofId,
+              decoration: const InputDecoration(
+                labelText: 'Work Proof ID / Reference',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.confirmation_number_outlined),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _upiId,
+              decoration: const InputDecoration(
+                labelText: 'UPI ID',
+                hintText: 'name@bank',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.account_balance_wallet_outlined),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _emergencyPhone,
+              keyboardType: TextInputType.phone,
+              maxLength: 10,
+              decoration: const InputDecoration(
+                labelText: 'Emergency Contact Number',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.local_phone_outlined),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _payoutPin,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              maxLength: 4,
+              decoration: const InputDecoration(
+                labelText: '4-digit Payout Security PIN',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.lock_outline),
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _enable2Fa,
+              onChanged: (value) => setState(() => _enable2Fa = value),
+              title: const Text('Enable 2FA for payout actions'),
+            ),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _consentAccepted,
+              onChanged: (value) => setState(() => _consentAccepted = value ?? false),
+              title: const Text('I confirm details are valid and consent to KYC verification.'),
+            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(_error!, style: const TextStyle(color: Colors.red, fontWeight: FontWeight.w700)),
+              ),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: widget.accent),
+                onPressed: _save,
+                icon: const Icon(Icons.verified_outlined),
+                label: const Text('Save KYC & Security Details'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class RiderWalletPage extends StatelessWidget {
   final PlanId planId;
   final double walletBalance;
@@ -1707,6 +2753,58 @@ class RiderWalletPage extends StatelessWidget {
   }
 }
 
+class RiderCoveragePage extends StatefulWidget {
+  final PlanId planId;
+  final ValueChanged<PlanId> onPlanSelected;
+  final List<InsurancePolicy> policies;
+  final SelectedInsurance? selectedInsurance;
+  final ValueChanged<InsurancePolicy> onPolicySelected;
+
+  const RiderCoveragePage({
+    super.key,
+    required this.planId,
+    required this.onPlanSelected,
+    required this.policies,
+    required this.selectedInsurance,
+    required this.onPolicySelected,
+  });
+
+  @override
+  State<RiderCoveragePage> createState() => _RiderCoveragePageState();
+}
+
+class _RiderCoveragePageState extends State<RiderCoveragePage> {
+  int _section = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: SegmentedButton<int>(
+            segments: const [
+              ButtonSegment(value: 0, icon: Icon(Icons.auto_graph_outlined), label: Text('Risk Plans')),
+              ButtonSegment(value: 1, icon: Icon(Icons.security_outlined), label: Text('Insurance')),
+            ],
+            selected: {_section},
+            onSelectionChanged: (value) => setState(() => _section = value.first),
+          ),
+        ),
+        Expanded(
+          child: _section == 0
+              ? RiderPricingPage(planId: widget.planId, onPlanSelected: widget.onPlanSelected)
+              : InsurancePolicyPage(
+                  policies: widget.policies,
+                  selectedInsurance: widget.selectedInsurance,
+                  onPolicySelected: widget.onPolicySelected,
+                ),
+        ),
+      ],
+    );
+  }
+}
+
 class RiderPricingPage extends StatelessWidget {
   final PlanId planId;
   final ValueChanged<PlanId> onPlanSelected;
@@ -1769,23 +2867,40 @@ class RiderAlertsPage extends StatelessWidget {
   final PlanId planId;
   final List<RiskAlert> alerts;
   final Set<String> simulatedAlertIds;
-  final ValueChanged<RiskAlert> onSimulatePayout;
+  final Set<String> reviewRequiredAlertIds;
+  final ValueChanged<RiskAlert>? onSimulatePayout;
 
-  const RiderAlertsPage({super.key, required this.planId, required this.alerts, required this.simulatedAlertIds, required this.onSimulatePayout});
+  const RiderAlertsPage({
+    super.key,
+    required this.planId,
+    required this.alerts,
+    required this.simulatedAlertIds,
+    required this.reviewRequiredAlertIds,
+    this.onSimulatePayout,
+  });
 
   @override
   Widget build(BuildContext context) {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        const Text('Parametric Triggers', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const Text('Payout Status Alerts', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
         const SizedBox(height: 8),
-        Text('Weather, AQI, curfew/strike, and simulated downtime windows drive automatic payouts.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+        Text('Your account is monitored for validated payout conditions.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
         const SizedBox(height: 12),
-        _LossSimulatorCard(planId: planId, alerts: alerts),
+        if (alerts.isNotEmpty)
+          _LossSimulatorCard(planId: planId, alerts: alerts)
+        else
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Text('No approved trigger alerts for your location yet. Save your operating location in KYC and wait for admin-approved events in your area.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+            ),
+          ),
         const SizedBox(height: 12),
         ...alerts.map((alert) {
           final simulated = simulatedAlertIds.contains(alert.id);
+          final underReview = reviewRequiredAlertIds.contains(alert.id);
           final payout = computePotentialPayout(planId: planId, alert: alert);
           final color = switch (alert.severity) { Severity.low => Colors.green, Severity.medium => Colors.orange, Severity.high => Colors.red };
 
@@ -1801,17 +2916,47 @@ class RiderAlertsPage extends StatelessWidget {
                       children: [
                         Icon(Icons.warning_amber_outlined, color: color),
                         const SizedBox(width: 8),
-                        Expanded(child: Text(alert.title, style: const TextStyle(fontWeight: FontWeight.w900))),
+                        Expanded(child: Text(riderAlertLabel(alert), style: const TextStyle(fontWeight: FontWeight.w900))),
                         Chip(label: Text(alert.severity.name.toUpperCase())),
                       ],
                     ),
                     const SizedBox(height: 8),
-                    Text(alert.triggerDescription),
+                    Text(alertTriggerSource(alert), style: TextStyle(color: Colors.black.withOpacity(0.70), fontSize: 12, fontWeight: FontWeight.w600)),
+                    TextButton.icon(
+                      onPressed: () => openSourceLink(context, bestAlertSourcePageUrl(alert)),
+                      icon: const Icon(Icons.link, size: 16),
+                      label: const Text('Open source page'),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                      ),
+                    ),
+                    TextButton.icon(
+                      onPressed: () => openSourceLink(context, bestAlertArticleUrl(alert)),
+                      icon: const Icon(Icons.open_in_new, size: 16),
+                      label: const Text('Open source'),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      underReview
+                          ? 'Status: Held for fraud review before payout.'
+                          : (simulated ? 'Status: Auto payout completed.' : 'Status: Awaiting auto payout processing.'),
+                    ),
                     const SizedBox(height: 6),
                     Text('Created: ${formatDate(alert.createdAt)}'),
+                    const SizedBox(height: 4),
+                    Text('How to verify/correct: ${alertCorrectionTip(alert)}', style: TextStyle(color: Colors.black.withOpacity(0.58), fontSize: 12, fontStyle: FontStyle.italic)),
                     Text('Potential payout: ${inrAmt(payout)}', style: TextStyle(fontWeight: FontWeight.w900, color: planId.accent)),
-                    const SizedBox(height: 10),
-                    FilledButton(onPressed: simulated ? null : () => onSimulatePayout(alert), child: Text(simulated ? 'Simulated' : 'Simulate payout')),
+                    const SizedBox(height: 8),
+                    Chip(
+                      label: Text(
+                        underReview
+                            ? 'Fraud review'
+                            : (simulated ? 'Auto paid' : 'Queued'),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1863,14 +3008,14 @@ class _LossSimulatorCardState extends State<_LossSimulatorCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Income-loss simulator', style: TextStyle(fontWeight: FontWeight.w900)),
+            const Text('Payout estimator', style: TextStyle(fontWeight: FontWeight.w900)),
             const SizedBox(height: 8),
-            Text('Loss = max(0, E - A). Prototype uses user-input actual earnings and AI-style expected earnings.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+            Text('Estimate possible payout using your current earnings input.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
             const SizedBox(height: 12),
             DropdownButtonFormField<int>(
               value: _selectedIndex,
-              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Select disruption window'),
-              items: List.generate(widget.alerts.length, (index) => DropdownMenuItem(value: index, child: Text(widget.alerts[index].title))),
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Select alert window'),
+              items: List.generate(widget.alerts.length, (index) => DropdownMenuItem(value: index, child: Text(riderAlertLabel(widget.alerts[index])))),
               onChanged: (value) => setState(() => _selectedIndex = value ?? 0),
             ),
             const SizedBox(height: 12),
@@ -2001,14 +3146,35 @@ class AdminHome extends StatelessWidget {
   final AuthUser user;
   final VoidCallback onSignOut;
   final PlanId planIdHint;
+  final List<NewsTriggerCandidate>? pendingNewsTriggers;
+  final List<RiskAlert>? approvedAlerts;
+  final List<FraudFlag>? fraudFlags;
+  final bool? isFetchingNewsTriggers;
+  final Future<void> Function() onFetchNewsTriggers;
+  final void Function(String triggerId, String affectedLocation) onApproveNewsTrigger;
+  final ValueChanged<String> onRejectNewsTrigger;
 
-  const AdminHome({super.key, required this.user, required this.planIdHint, required this.onSignOut});
+  const AdminHome({
+    super.key,
+    required this.user,
+    required this.planIdHint,
+    this.pendingNewsTriggers,
+    this.approvedAlerts,
+    this.fraudFlags,
+    this.isFetchingNewsTriggers,
+    required this.onFetchNewsTriggers,
+    required this.onApproveNewsTrigger,
+    required this.onRejectNewsTrigger,
+    required this.onSignOut,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final fraudFlags = _buildFraudFlags();
-    final alerts = _buildTriggerFeed();
-    final payouts = _buildAuditPayouts(planIdHint);
+    final pending = pendingNewsTriggers ?? const <NewsTriggerCandidate>[];
+    final approved = approvedAlerts ?? const <RiskAlert>[];
+    final fraudFlagsData = fraudFlags ?? const <FraudFlag>[];
+    final payouts = _buildAuditPayouts(planIdHint, approved);
+    final analytics = _buildAnalytics(pending, approved, fraudFlagsData);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Admin Dashboard'), actions: [IconButton(onPressed: onSignOut, icon: const Icon(Icons.logout_outlined))]),
@@ -2033,11 +3199,51 @@ class AdminHome extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          _section('Fraud detection', _FraudFlagsCard(flags: fraudFlags)),
-          _section('Trigger feed', _TriggerFeedCard(alerts: alerts)),
+          _section('Intelligent analytics', _AdminAnalyticsCard(metrics: analytics, accent: planIdHint.accent)),
+          _section(
+            'News Trigger Intake (Uncontrollable Conditions Only)',
+            _AdminNewsTriggerQueueCard(
+              pendingNewsTriggers: pending,
+              isFetching: isFetchingNewsTriggers ?? false,
+              onFetch: onFetchNewsTriggers,
+              onApprove: onApproveNewsTrigger,
+              onReject: onRejectNewsTrigger,
+            ),
+          ),
+          _section('Fraud detection', _FraudFlagsCard(flags: fraudFlagsData)),
+          _section('Approved trigger feed (rider-visible)', _TriggerFeedCard(alerts: approved)),
           _section('Payout audit', _PayoutAuditCard(payouts: payouts, accent: planIdHint.accent)),
         ],
       ),
+    );
+  }
+
+  AdminAnalyticsSnapshot _buildAnalytics(
+    List<NewsTriggerCandidate> pending,
+    List<RiskAlert> approved,
+    List<FraudFlag> flags,
+  ) {
+    final critical = flags.where((f) => f.score >= 0.72).length;
+    final warning = flags.where((f) => f.score >= 0.45 && f.score < 0.72).length;
+    final highSeverity = approved.where((a) => a.severity == Severity.high).length;
+    final sourceCount = approved.map((a) => a.source).toSet().length;
+    final exposure = approved.fold<double>(0, (sum, alert) => sum + computePotentialPayout(planId: planIdHint, alert: alert));
+
+    final locationDistribution = <String, int>{};
+    for (final alert in approved) {
+      final location = alert.affectedLocation.trim().isEmpty ? 'all' : alert.affectedLocation.trim();
+      locationDistribution[location] = (locationDistribution[location] ?? 0) + 1;
+    }
+
+    return AdminAnalyticsSnapshot(
+      pendingTriggers: pending.length,
+      approvedTriggers: approved.length,
+      criticalFraudFlags: critical,
+      warningFraudFlags: warning,
+      highSeverityTriggers: highSeverity,
+      sourceCount: sourceCount,
+      estimatedWeeklyExposure: exposure,
+      locationDistribution: locationDistribution,
     );
   }
 
@@ -2054,31 +3260,183 @@ class AdminHome extends StatelessWidget {
     );
   }
 
-  List<FraudFlag> _buildFraudFlags() {
+  List<Payout> _buildAuditPayouts(PlanId planId, List<RiskAlert> approved) {
+    if (approved.isEmpty) return const [];
     final now = DateTime.now();
     return [
-      FraudFlag(id: 'f1', riderEmail: 'rider.alpha@demo.com', score: 0.86, reasons: const ['GPS anomaly', 'Route deviation', 'Behavior spike'], createdAt: now.subtract(const Duration(hours: 5))),
-      FraudFlag(id: 'f2', riderEmail: 'rider.beta@demo.com', score: 0.44, reasons: const ['Short drift', 'Unusual stop pattern'], createdAt: now.subtract(const Duration(days: 1))),
-      FraudFlag(id: 'f3', riderEmail: 'rider.gamma@demo.com', score: 0.21, reasons: const ['No anomaly signals'], createdAt: now.subtract(const Duration(days: 2))),
+      ...approved.take(2).toList().asMap().entries.map(
+        (entry) => Payout(
+          id: 'pa${entry.key + 1}',
+          reason: entry.value.title,
+          date: now.subtract(Duration(days: entry.key + 1)),
+          amount: computePotentialPayout(planId: planId, alert: entry.value),
+        ),
+      ),
     ];
   }
+}
 
-  List<RiskAlert> _buildTriggerFeed() {
-    final now = DateTime.now();
-    return [
-      RiskAlert(id: 'rain_admin', title: 'Rainfall >= 50mm', triggerDescription: 'Parametric trigger detected', severity: Severity.high, createdAt: now.subtract(const Duration(hours: 9))),
-      RiskAlert(id: 'heat_admin', title: 'Temperature >= 42°C', triggerDescription: 'Heat wave detected', severity: Severity.medium, createdAt: now.subtract(const Duration(hours: 16))),
-      RiskAlert(id: 'outage_admin', title: 'Platform downtime', triggerDescription: 'Simulated outage during peak', severity: Severity.high, createdAt: now.subtract(const Duration(days: 1))),
-    ];
+class _AdminNewsTriggerQueueCard extends StatelessWidget {
+  final List<NewsTriggerCandidate> pendingNewsTriggers;
+  final bool? isFetching;
+  final Future<void> Function() onFetch;
+  final void Function(String triggerId, String affectedLocation) onApprove;
+  final ValueChanged<String> onReject;
+
+  const _AdminNewsTriggerQueueCard({
+    required this.pendingNewsTriggers,
+    this.isFetching,
+    required this.onFetch,
+    required this.onApprove,
+    required this.onReject,
+  });
+
+  String _categoryText(TriggerCategory category) {
+    return switch (category) {
+      TriggerCategory.appDowntime => 'App downtime',
+      TriggerCategory.rainfall => 'Rainfall',
+      TriggerCategory.extremeHeat => 'Extreme heat',
+      TriggerCategory.pollution => 'Severe pollution',
+      TriggerCategory.war => 'War',
+      TriggerCategory.lockdown => 'Lockdown',
+    };
   }
 
-  List<Payout> _buildAuditPayouts(PlanId planId) {
-    final triggers = _buildTriggerFeed();
-    final now = DateTime.now();
-    return [
-      Payout(id: 'pa1', reason: 'Rainfall spike', date: now.subtract(const Duration(days: 1)), amount: computePotentialPayout(planId: planId, alert: triggers[0])),
-      Payout(id: 'pa2', reason: 'Outage window', date: now.subtract(const Duration(days: 2)), amount: computePotentialPayout(planId: planId, alert: triggers[2])),
-    ];
+  Future<String?> _promptAffectedLocation(BuildContext context, NewsTriggerCandidate candidate) async {
+    final locationController = TextEditingController(text: candidate.suggestedLocation == 'all' ? '' : candidate.suggestedLocation);
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Affected location'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Enter the area where riders are actually affected. Leave blank to target all locations.'),
+              const SizedBox(height: 12),
+              TextField(
+                controller: locationController,
+                decoration: const InputDecoration(
+                  labelText: 'City / Area / Zone',
+                  hintText: 'Example: Bengaluru, Koramangala',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(null), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final value = locationController.text.trim();
+                Navigator.of(dialogContext).pop(value.isEmpty ? 'all' : value);
+              },
+              child: const Text('Approve'),
+            ),
+          ],
+        );
+      },
+    );
+    locationController.dispose();
+    return selected;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fetching = isFetching ?? false;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Fetch source is restricted to uncontrollable conditions only: App downtime, Rainfall, Extreme heat, Severe pollution, War, and Lockdown/Curfew. Sources include weather/AQI APIs and simulated platform/civic feeds. Admin approval is required before riders can see them.',
+                    style: TextStyle(color: Colors.black.withOpacity(0.7)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.icon(
+                  onPressed: fetching ? null : () => onFetch(),
+                  icon: fetching
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                      : const Icon(Icons.public_outlined),
+                  label: Text(fetching ? 'Fetching...' : 'Fetch uncontrollable triggers'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (pendingNewsTriggers.isEmpty)
+              const Text('No pending triggers. Fetch latest news to review new events.')
+            else
+              ...pendingNewsTriggers.take(10).map(
+                    (candidate) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.black.withOpacity(0.08)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(child: Text(candidate.title, style: const TextStyle(fontWeight: FontWeight.w800))),
+                                Chip(label: Text(_categoryText(candidate.category))),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(candidate.summary, maxLines: 2, overflow: TextOverflow.ellipsis),
+                            const SizedBox(height: 4),
+                            Text('Source: ${candidate.source} • ${formatDate(candidate.publishedAt)}', style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
+                            Text('Suggested impact location: ${candidate.suggestedLocation}', style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
+                            TextButton.icon(
+                              onPressed: () => openSourceLink(context, bestCandidateSourcePageUrl(candidate)),
+                              icon: const Icon(Icons.link, size: 16),
+                              label: const Text('Open source page'),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                              ),
+                            ),
+                            TextButton.icon(
+                              onPressed: () => openSourceLink(context, bestCandidateArticleUrl(candidate)),
+                              icon: const Icon(Icons.open_in_new, size: 16),
+                              label: const Text('Open source'),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                OutlinedButton.icon(onPressed: () => onReject(candidate.id), icon: const Icon(Icons.close), label: const Text('Reject')),
+                                const SizedBox(width: 8),
+                                FilledButton.icon(
+                                  onPressed: () async {
+                                    final affectedLocation = await _promptAffectedLocation(context, candidate);
+                                    if (affectedLocation == null) return;
+                                    onApprove(candidate.id, affectedLocation);
+                                  },
+                                  icon: const Icon(Icons.check),
+                                  label: const Text('Approve for riders'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -2095,19 +3453,29 @@ class _AdminChip extends StatelessWidget {
 }
 
 class _FraudFlagsCard extends StatelessWidget {
-  final List<FraudFlag> flags;
+  final List<FraudFlag>? flags;
 
   const _FraudFlagsCard({required this.flags});
 
   @override
   Widget build(BuildContext context) {
+    final safeFlags = flags ?? const <FraudFlag>[];
+    final sorted = [...safeFlags]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final critical = sorted.where((f) => f.score >= 0.72).length;
+    final medium = sorted.where((f) => f.score >= 0.45 && f.score < 0.72).length;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: flags
-              .map(
+          children: [
+            Text('Total flags: ${sorted.length} • Critical: $critical • Medium: $medium', style: const TextStyle(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            if (sorted.isEmpty)
+              Text('No fraud anomalies flagged yet. Auto payouts are running with current risk checks.', style: TextStyle(color: Colors.black.withOpacity(0.65)))
+            else
+              ...sorted.take(8).map(
                 (flag) => Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   child: Column(
@@ -2116,12 +3484,13 @@ class _FraudFlagsCard extends StatelessWidget {
                       Text(flag.riderEmail, style: const TextStyle(fontWeight: FontWeight.w900)),
                       const SizedBox(height: 4),
                       Text('Score: ${(flag.score * 100).toStringAsFixed(0)}%'),
+                      Text('Reason: ${flag.reasons.join(', ')}', style: TextStyle(color: Colors.black.withOpacity(0.75), fontSize: 12)),
                       Text('Created: ${formatDate(flag.createdAt)}', style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
                     ],
                   ),
                 ),
               )
-              .toList(),
+          ],
         ),
       ),
     );
@@ -2140,21 +3509,44 @@ class _TriggerFeedCard extends StatelessWidget {
         padding: const EdgeInsets.all(18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: alerts
-              .map(
-                (alert) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(alert.title, style: const TextStyle(fontWeight: FontWeight.w900)),
-                      const SizedBox(height: 4),
-                      Text(alert.triggerDescription),
-                    ],
-                  ),
-                ),
-              )
-              .toList(),
+          children: alerts.isEmpty
+              ? const [Text('No approved triggers yet. Approve items from the news queue above to send them to riders.')]
+              : alerts
+                    .map(
+                      (alert) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(alert.title, style: const TextStyle(fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 4),
+                            Text(alert.triggerDescription),
+                            const SizedBox(height: 4),
+                            Text(
+                              alertTriggerSource(alert),
+                              style: TextStyle(color: Colors.black.withOpacity(0.65), fontSize: 12),
+                            ),
+                            TextButton.icon(
+                              onPressed: () => openSourceLink(context, bestAlertSourcePageUrl(alert)),
+                              icon: const Icon(Icons.link, size: 16),
+                              label: const Text('Open source page'),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                              ),
+                            ),
+                            TextButton.icon(
+                              onPressed: () => openSourceLink(context, bestAlertArticleUrl(alert)),
+                              icon: const Icon(Icons.open_in_new, size: 16),
+                              label: const Text('Open source'),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                    .toList(),
         ),
       ),
     );
@@ -2230,9 +3622,9 @@ class InsurancePolicyPage extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        const Text('Insurance Policies', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const Text('Weekly Income Protection Policies', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
         const SizedBox(height: 8),
-        Text('Select an insurance policy to protect yourself', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+        Text('Select a weekly income-loss policy for external disruption protection', style: TextStyle(color: Colors.black.withOpacity(0.65))),
         const SizedBox(height: 16),
         if (selectedInsurance != null)
           Card(
@@ -2250,7 +3642,7 @@ class InsurancePolicyPage extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  Text('Validity: ${formatDate(selectedInsurance!.startDate)} to ${formatDate(selectedInsurance!.startDate.add(const Duration(days: 30)))}', style: TextStyle(color: Colors.black.withOpacity(0.6))),
+                  Text('Validity: ${formatDate(selectedInsurance!.startDate)} to ${formatDate(selectedInsurance!.startDate.add(const Duration(days: 7)))}', style: TextStyle(color: Colors.black.withOpacity(0.6))),
                   if (selectedInsurance!.paymentDate != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
@@ -2315,7 +3707,7 @@ class InsurancePolicyPage extends StatelessWidget {
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Premium: ${inrAmt(policy.premiumMonthly)}/month', style: const TextStyle(fontWeight: FontWeight.w700)),
+                            Text('Weekly premium: ${inrAmt(policy.weeklyPremium)}/week', style: const TextStyle(fontWeight: FontWeight.w700)),
                             Text('Coverage: ${inrInt(policy.coverageAmount)}', style: TextStyle(color: Colors.black.withOpacity(0.65), fontSize: 13)),
                           ],
                         ),
@@ -2400,15 +3792,15 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
             const SizedBox(height: 16),
             const Text('No policy selected', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
             const SizedBox(height: 8),
-            Text('Select an insurance policy first', style: TextStyle(color: Colors.black.withOpacity(0.6))),
+            Text('Select a weekly income protection policy first', style: TextStyle(color: Colors.black.withOpacity(0.6))),
           ],
         ),
       );
     }
 
     final policyColor = _getPolicyColor(policy.type);
-    final gstAmount = (policy.premiumMonthly * 0.18);
-    final totalAmount = policy.premiumMonthly + gstAmount;
+    final gstAmount = (policy.weeklyPremium * 0.18);
+    final totalAmount = policy.weeklyPremium + gstAmount;
     final canPay = widget.walletBalance >= totalAmount;
 
     return ListView(
@@ -2459,7 +3851,7 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
               children: [
                 const Text('Price Breakdown', style: TextStyle(fontWeight: FontWeight.w900)),
                 const SizedBox(height: 12),
-                _priceRow('Policy Premium', inrAmt(policy.premiumMonthly), policyColor),
+                _priceRow('Weekly Premium', inrAmt(policy.weeklyPremium), policyColor),
                 _priceRow('GST (18%)', inrAmt(gstAmount), Colors.grey, isGray: true),
                 const Divider(height: 12),
                 _priceRow('Total Amount', inrAmt(totalAmount), policyColor, isBold: true),
@@ -2537,7 +3929,7 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
                 const Text('Policy Details', style: TextStyle(fontWeight: FontWeight.w900)),
                 const SizedBox(height: 12),
                 _detailRow('Coverage Amount', inrInt(policy.coverageAmount)),
-                _detailRow('Validity', '30 days from activation'),
+                _detailRow('Validity', '7 days from activation'),
                 _detailRow('Type', policy.type.toUpperCase()),
               ],
             ),
@@ -2602,7 +3994,7 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
   void _processPayment(double amount, Color color) {
     final policy = widget.selectedInsurance?.policy;
     if (policy == null) return;
-    final gstAmount = policy.premiumMonthly * 0.18;
+    final gstAmount = policy.weeklyPremium * 0.18;
 
     setState(() => _isProcessing = true);
 
@@ -2653,5 +4045,63 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
       'comprehensive' => const Color(0xFF7C3AED),
       _ => const Color(0xFF0F766E),
     };
+  }
+}
+
+class _AdminAnalyticsCard extends StatelessWidget {
+  final AdminAnalyticsSnapshot metrics;
+  final Color accent;
+
+  const _AdminAnalyticsCard({required this.metrics, required this.accent});
+
+  @override
+  Widget build(BuildContext context) {
+    final fraudTotal = metrics.criticalFraudFlags + metrics.warningFraudFlags;
+    final fraudPressure = metrics.approvedTriggers == 0 ? 0.0 : (fraudTotal / metrics.approvedTriggers).clamp(0.0, 1.0);
+    final topLocations = metrics.locationDistribution.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 12,
+              runSpacing: 10,
+              children: [
+                _metricChip('Pending triggers', '${metrics.pendingTriggers}'),
+                _metricChip('Approved triggers', '${metrics.approvedTriggers}'),
+                _metricChip('High severity', '${metrics.highSeverityTriggers}'),
+                _metricChip('Data sources', '${metrics.sourceCount}'),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text('Estimated weekly exposure: ${inrAmt(metrics.estimatedWeeklyExposure)}', style: TextStyle(color: accent, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            Text('Fraud pressure index ${(fraudPressure * 100).toStringAsFixed(0)}% (critical ${metrics.criticalFraudFlags}, warning ${metrics.warningFraudFlags})'),
+            const SizedBox(height: 8),
+            LinearProgressIndicator(value: fraudPressure, minHeight: 8, color: fraudPressure > 0.45 ? Colors.red : accent),
+            const SizedBox(height: 12),
+            Text('Location distribution', style: TextStyle(fontWeight: FontWeight.w800, color: Colors.black.withOpacity(0.8))),
+            const SizedBox(height: 6),
+            if (topLocations.isEmpty)
+              Text('No approved trigger locations yet.', style: TextStyle(color: Colors.black.withOpacity(0.65)))
+            else
+              ...topLocations.take(4).map(
+                    (entry) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Text('${entry.key}: ${entry.value} trigger(s)'),
+                    ),
+                  ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _metricChip(String label, String value) {
+    return Chip(label: Text('$label: $value'));
   }
 }

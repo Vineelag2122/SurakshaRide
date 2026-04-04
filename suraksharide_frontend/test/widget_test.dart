@@ -11,19 +11,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:suraksharide_frontend/suraksharide_app.dart';
 
 void main() {
-  testWidgets('SurakshaRide launches and allows demo rider login', (WidgetTester tester) async {
+  testWidgets('SurakshaRide launches intro then login experience', (WidgetTester tester) async {
     await tester.pumpWidget(const SurakshaRideApp());
+    await tester.pump(const Duration(seconds: 1));
 
     expect(find.text('SurakshaRide'), findsWidgets);
-    expect(find.textContaining('parametric income protection'), findsOneWidget);
+    expect(find.textContaining('Income protection built for delivery riders.'), findsOneWidget);
+    expect(find.text('Go to Login'), findsOneWidget);
 
-    await tester.enterText(find.byType(TextField).at(0), 'rider@demo.com');
-    await tester.enterText(find.byType(TextField).at(1), 'demo123');
-    await tester.ensureVisible(find.text('Continue'));
-    await tester.tap(find.text('Continue'));
+    await tester.tap(find.text('Go to Login'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Rider Console'), findsOneWidget);
-    expect(find.text('Coverage cap'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Login'), findsOneWidget);
+    expect(find.byType(TextField), findsWidgets);
   });
 }

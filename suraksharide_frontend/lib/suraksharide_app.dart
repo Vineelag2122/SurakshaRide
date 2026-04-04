@@ -353,6 +353,7 @@ class AuthActionResult {
 class AppDatabase {
   static final AppDatabase instance = AppDatabase._internal();
   static const String dbName = 'suraksharide.db';
+  static const int dbVersion = 4;
 
   static const String tableUsers = 'users';
   static const String tablePolicies = 'policies';
@@ -360,6 +361,8 @@ class AppDatabase {
   static const String tablePayments = 'payments';
   static const String tablePayouts = 'payouts';
   static const String tableAlerts = 'alerts';
+  static const String tableRiderProfiles = 'rider_profiles';
+  static const String tableRiderLocationAudit = 'rider_location_audit';
 
   AppDatabase._internal();
 
@@ -368,6 +371,10 @@ class AppDatabase {
   sqflite.Database? _database;
   final Map<String, Map<String, Object?>> _usersMemory = {};
   final Map<String, Map<String, Object?>> _policiesMemory = {};
+  final Map<String, Map<String, Object?>> _riderProfilesMemory = {};
+  final Map<String, Map<String, Object?>> _alertsMemory = {};
+  final List<Map<String, Object?>> _payoutsMemory = [];
+  final List<Map<String, Object?>> _riderLocationAuditMemory = [];
   final List<Map<String, Object?>> _selectedPoliciesMemory = [];
   final List<Map<String, Object?>> _paymentsMemory = [];
   int _selectedPolicyAutoId = 0;
@@ -394,8 +401,9 @@ class AppDatabase {
       return sqflite_ffi.databaseFactoryFfi.openDatabase(
         fullPath,
         options: sqflite.OpenDatabaseOptions(
-          version: 1,
+          version: dbVersion,
           onCreate: _onCreate,
+          onUpgrade: _onUpgrade,
           onOpen: onOpenWithForeignKeys,
         ),
       );
@@ -420,8 +428,9 @@ class AppDatabase {
       final fullPath = path.join(dbPath, dbName);
       return sqflite.openDatabase(
         fullPath,
-        version: 1,
+        version: dbVersion,
         onCreate: _onCreate,
+        onUpgrade: _onUpgrade,
         onOpen: onOpenWithForeignKeys,
       );
     } on StateError catch (error) {
@@ -452,6 +461,29 @@ class AppDatabase {
       'role': UserRole.rider.name,
       'created_at': now,
     };
+
+    _riderProfilesMemory['rider@demo.com'] = {
+      'user_email': 'rider@demo.com',
+      'aadhaar_number': '123412341234',
+      'operating_location': 'Bengaluru',
+      'work_proof_type': 'Delivery ID',
+      'work_proof_id': 'DLY123456',
+      'upi_id': 'rider@bank',
+      'emergency_phone': '9876543210',
+      'payout_pin': '1234',
+      'enable_2fa': 1,
+      'consent_accepted': 1,
+      'is_verified': 1,
+      'wallet_balance': 0.0,
+      'updated_at': now,
+    };
+
+    _riderLocationAuditMemory.add({
+      'id': 1,
+      'user_email': 'rider@demo.com',
+      'location': 'Bengaluru',
+      'changed_at': now,
+    });
 
     _usersMemory['admin@demo.com'] = {
       'email': 'admin@demo.com',
@@ -576,10 +608,86 @@ class AppDatabase {
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         trigger_description TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL DEFAULT '',
+        source_page_url TEXT NOT NULL DEFAULT '',
+        affected_location TEXT NOT NULL DEFAULT 'all',
         severity TEXT NOT NULL,
         created_at TEXT NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE $tableRiderProfiles (
+        user_email TEXT PRIMARY KEY,
+        aadhaar_number TEXT NOT NULL DEFAULT '',
+        operating_location TEXT NOT NULL DEFAULT '',
+        work_proof_type TEXT NOT NULL DEFAULT 'Delivery ID',
+        work_proof_id TEXT NOT NULL DEFAULT '',
+        upi_id TEXT NOT NULL DEFAULT '',
+        emergency_phone TEXT NOT NULL DEFAULT '',
+        payout_pin TEXT NOT NULL DEFAULT '',
+        enable_2fa INTEGER NOT NULL DEFAULT 0,
+        consent_accepted INTEGER NOT NULL DEFAULT 0,
+        is_verified INTEGER NOT NULL DEFAULT 0,
+        wallet_balance REAL NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_email) REFERENCES $tableUsers(email) ON DELETE CASCADE
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE $tableRiderLocationAudit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT NOT NULL,
+        location TEXT NOT NULL,
+        changed_at TEXT NOT NULL,
+        FOREIGN KEY (user_email) REFERENCES $tableUsers(email) ON DELETE CASCADE
+      )
+    ''');
+  }
+
+  Future<void> _onUpgrade(sqflite.Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute("ALTER TABLE $tableAlerts ADD COLUMN source TEXT NOT NULL DEFAULT ''");
+      await db.execute("ALTER TABLE $tableAlerts ADD COLUMN source_url TEXT NOT NULL DEFAULT ''");
+      await db.execute("ALTER TABLE $tableAlerts ADD COLUMN source_page_url TEXT NOT NULL DEFAULT ''");
+      await db.execute("ALTER TABLE $tableAlerts ADD COLUMN affected_location TEXT NOT NULL DEFAULT 'all'");
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS $tableRiderProfiles (
+          user_email TEXT PRIMARY KEY,
+          aadhaar_number TEXT NOT NULL DEFAULT '',
+          operating_location TEXT NOT NULL DEFAULT '',
+          work_proof_type TEXT NOT NULL DEFAULT 'Delivery ID',
+          work_proof_id TEXT NOT NULL DEFAULT '',
+          upi_id TEXT NOT NULL DEFAULT '',
+          emergency_phone TEXT NOT NULL DEFAULT '',
+          payout_pin TEXT NOT NULL DEFAULT '',
+          enable_2fa INTEGER NOT NULL DEFAULT 0,
+          consent_accepted INTEGER NOT NULL DEFAULT 0,
+          is_verified INTEGER NOT NULL DEFAULT 0,
+          wallet_balance REAL NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (user_email) REFERENCES $tableUsers(email) ON DELETE CASCADE
+        )
+      ''');
+    }
+
+    if (oldVersion < 3) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS $tableRiderLocationAudit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_email TEXT NOT NULL,
+          location TEXT NOT NULL,
+          changed_at TEXT NOT NULL,
+          FOREIGN KEY (user_email) REFERENCES $tableUsers(email) ON DELETE CASCADE
+        )
+      ''');
+    }
+
+    if (oldVersion < 4) {
+      await db.execute("ALTER TABLE $tableRiderProfiles ADD COLUMN wallet_balance REAL NOT NULL DEFAULT 0");
+    }
   }
 
   Future<void> _seedDefaults(sqflite.Database db) async {
@@ -653,6 +761,22 @@ class AppDatabase {
     for (final policy in policies) {
       await db.insert(tablePolicies, policy, conflictAlgorithm: sqflite.ConflictAlgorithm.ignore);
     }
+
+    await saveRiderSecurityProfile(
+      userEmail: 'rider@demo.com',
+      profile: const RiderSecurityProfile(
+        aadhaarNumber: '123412341234',
+        operatingLocation: 'Bengaluru',
+        workProofType: 'Delivery ID',
+        workProofId: 'DLY123456',
+        upiId: 'rider@bank',
+        emergencyPhone: '9876543210',
+        payoutPin: '1234',
+        enable2Fa: true,
+        consentAccepted: true,
+        isVerified: true,
+      ),
+    );
   }
 
   Future<AuthActionResult> loginUser({
@@ -842,6 +966,16 @@ class AppDatabase {
         row['payment_date'] = nowIso;
         row['amount_paid'] = totalAmount;
         row['status'] = 'active';
+      } else {
+        final activeRows = _selectedPoliciesMemory
+            .where((row) => row['user_email'] == userEmail && row['policy_id'] == policyId && row['status'] == 'active')
+            .toList();
+        if (activeRows.isNotEmpty) {
+          activeRows.sort((a, b) => ((b['id'] as int?) ?? 0).compareTo((a['id'] as int?) ?? 0));
+          final row = activeRows.first;
+          row['payment_date'] = nowIso;
+          row['amount_paid'] = totalAmount;
+        }
       }
 
       _paymentAutoId += 1;
@@ -883,6 +1017,26 @@ class AppDatabase {
           where: 'id = ?',
           whereArgs: [selectedId],
         );
+      } else {
+        final activeRows = await txn.query(
+          tableSelectedPolicies,
+          where: 'user_email = ? AND policy_id = ? AND status = ?',
+          whereArgs: [userEmail, policyId, 'active'],
+          orderBy: 'id DESC',
+          limit: 1,
+        );
+        if (activeRows.isNotEmpty) {
+          final activeId = activeRows.first['id'] as int;
+          await txn.update(
+            tableSelectedPolicies,
+            {
+              'payment_date': nowIso,
+              'amount_paid': totalAmount,
+            },
+            where: 'id = ?',
+            whereArgs: [activeId],
+          );
+        }
       }
 
       await txn.insert(tablePayments, {
@@ -896,6 +1050,364 @@ class AppDatabase {
         'created_at': nowIso,
       });
     });
+  }
+
+  Future<void> saveAutoPayout({required String userEmail, required Payout payout}) async {
+    final persistedId = '${userEmail}__${payout.id}';
+
+    if (_useMemoryStore) {
+      final exists = _payoutsMemory.any((row) => row['id'] == persistedId);
+      if (exists) return;
+      _payoutsMemory.add({
+        'id': persistedId,
+        'reason': payout.reason,
+        'payout_date': payout.date.toIso8601String(),
+        'amount': payout.amount,
+      });
+      return;
+    }
+
+    final db = await database;
+    await db.insert(
+      tablePayouts,
+      {
+        'id': persistedId,
+        'reason': payout.reason,
+        'payout_date': payout.date.toIso8601String(),
+        'amount': payout.amount,
+      },
+      conflictAlgorithm: sqflite.ConflictAlgorithm.ignore,
+    );
+  }
+
+  Future<List<Payout>> getPayoutsForUser(String userEmail) async {
+    if (_useMemoryStore) {
+      final rows = _payoutsMemory
+          .where((row) => ((row['id'] as String?) ?? '').startsWith('${userEmail}__'))
+          .toList()
+        ..sort((a, b) => DateTime.parse((b['payout_date'] as String?) ?? DateTime.now().toIso8601String())
+            .compareTo(DateTime.parse((a['payout_date'] as String?) ?? DateTime.now().toIso8601String())));
+      return rows.map((row) => _payoutFromPersistedMap(row, userEmail)).toList();
+    }
+
+    final db = await database;
+    final rows = await db.query(tablePayouts, orderBy: 'payout_date DESC');
+    return rows
+        .where((row) => ((row['id'] as String?) ?? '').startsWith('${userEmail}__'))
+        .map((row) => _payoutFromPersistedMap(row, userEmail))
+        .toList();
+  }
+
+  Future<void> saveRiderSecurityProfile({required String userEmail, required RiderSecurityProfile profile}) async {
+    final nowIso = DateTime.now().toIso8601String();
+    final normalizedIncomingLocation = profile.operatingLocation.trim().toLowerCase();
+
+    if (_useMemoryStore) {
+      final previous = _riderProfilesMemory[userEmail];
+      final previousLocation = ((previous?['operating_location'] as String?) ?? '').trim().toLowerCase();
+
+      _riderProfilesMemory[userEmail] = {
+        'user_email': userEmail,
+        'aadhaar_number': profile.aadhaarNumber,
+        'operating_location': profile.operatingLocation,
+        'work_proof_type': profile.workProofType,
+        'work_proof_id': profile.workProofId,
+        'upi_id': profile.upiId,
+        'emergency_phone': profile.emergencyPhone,
+        'payout_pin': profile.payoutPin,
+        'enable_2fa': profile.enable2Fa ? 1 : 0,
+        'consent_accepted': profile.consentAccepted ? 1 : 0,
+        'is_verified': profile.isVerified ? 1 : 0,
+        'wallet_balance': (previous?['wallet_balance'] as num?)?.toDouble() ?? 0.0,
+        'updated_at': nowIso,
+      };
+
+      if (normalizedIncomingLocation.isNotEmpty && normalizedIncomingLocation != previousLocation) {
+        _riderLocationAuditMemory.add({
+          'id': _riderLocationAuditMemory.length + 1,
+          'user_email': userEmail,
+          'location': profile.operatingLocation,
+          'changed_at': nowIso,
+        });
+      }
+      return;
+    }
+
+    final db = await database;
+    final existing = await db.query(
+      tableRiderProfiles,
+      where: 'user_email = ?',
+      whereArgs: [userEmail],
+      limit: 1,
+    );
+    final previousLocation = existing.isEmpty
+        ? ''
+        : ((existing.first['operating_location'] as String?) ?? '').trim().toLowerCase();
+
+    await db.insert(
+      tableRiderProfiles,
+      {
+        'user_email': userEmail,
+        'aadhaar_number': profile.aadhaarNumber,
+        'operating_location': profile.operatingLocation,
+        'work_proof_type': profile.workProofType,
+        'work_proof_id': profile.workProofId,
+        'upi_id': profile.upiId,
+        'emergency_phone': profile.emergencyPhone,
+        'payout_pin': profile.payoutPin,
+        'enable_2fa': profile.enable2Fa ? 1 : 0,
+        'consent_accepted': profile.consentAccepted ? 1 : 0,
+        'is_verified': profile.isVerified ? 1 : 0,
+        'wallet_balance': existing.isEmpty ? 0.0 : ((existing.first['wallet_balance'] as num?)?.toDouble() ?? 0.0),
+        'updated_at': nowIso,
+      },
+      conflictAlgorithm: sqflite.ConflictAlgorithm.replace,
+    );
+
+    if (normalizedIncomingLocation.isNotEmpty && normalizedIncomingLocation != previousLocation) {
+      await db.insert(tableRiderLocationAudit, {
+        'user_email': userEmail,
+        'location': profile.operatingLocation,
+        'changed_at': nowIso,
+      });
+    }
+  }
+
+  Future<({int changes7d, int distinct30d, int? hoursSinceLastChange})> getRiderLocationIntegritySignals(String userEmail) async {
+    final now = DateTime.now();
+    final from7d = now.subtract(const Duration(days: 7));
+    final from30d = now.subtract(const Duration(days: 30));
+
+    if (_useMemoryStore) {
+      final rows = _riderLocationAuditMemory.where((row) => row['user_email'] == userEmail).toList();
+      final recent7d = rows.where((row) {
+        final changedAt = DateTime.tryParse((row['changed_at'] as String?) ?? '');
+        return changedAt != null && changedAt.isAfter(from7d);
+      }).toList();
+      final recent30d = rows.where((row) {
+        final changedAt = DateTime.tryParse((row['changed_at'] as String?) ?? '');
+        return changedAt != null && changedAt.isAfter(from30d);
+      }).toList();
+      DateTime? lastChange;
+      for (final row in rows) {
+        final changedAt = DateTime.tryParse((row['changed_at'] as String?) ?? '');
+        if (changedAt != null && (lastChange == null || changedAt.isAfter(lastChange))) {
+          lastChange = changedAt;
+        }
+      }
+      final distinct30d = recent30d.map((row) => ((row['location'] as String?) ?? '').trim().toLowerCase()).where((location) => location.isNotEmpty).toSet().length;
+      final hoursSinceLastChange = lastChange == null ? null : now.difference(lastChange).inHours;
+      return (changes7d: recent7d.length, distinct30d: distinct30d, hoursSinceLastChange: hoursSinceLastChange);
+    }
+
+    final db = await database;
+    final rows = await db.query(
+      tableRiderLocationAudit,
+      where: 'user_email = ?',
+      whereArgs: [userEmail],
+      orderBy: 'changed_at DESC',
+    );
+
+    final recent7d = rows.where((row) {
+      final changedAt = DateTime.tryParse((row['changed_at'] as String?) ?? '');
+      return changedAt != null && changedAt.isAfter(from7d);
+    }).length;
+
+    final distinct30d = rows
+        .where((row) {
+          final changedAt = DateTime.tryParse((row['changed_at'] as String?) ?? '');
+          return changedAt != null && changedAt.isAfter(from30d);
+        })
+        .map((row) => ((row['location'] as String?) ?? '').trim().toLowerCase())
+        .where((location) => location.isNotEmpty)
+        .toSet()
+        .length;
+
+    final latest = rows.isEmpty ? null : DateTime.tryParse((rows.first['changed_at'] as String?) ?? '');
+    final hoursSinceLastChange = latest == null ? null : now.difference(latest).inHours;
+
+    return (changes7d: recent7d, distinct30d: distinct30d, hoursSinceLastChange: hoursSinceLastChange);
+  }
+
+  Future<RiderSecurityProfile> getRiderSecurityProfile(String userEmail) async {
+    if (_useMemoryStore) {
+      return _profileFromMap(_riderProfilesMemory[userEmail]);
+    }
+
+    final db = await database;
+    final rows = await db.query(
+      tableRiderProfiles,
+      where: 'user_email = ?',
+      whereArgs: [userEmail],
+      limit: 1,
+    );
+    if (rows.isEmpty) return const RiderSecurityProfile();
+    return _profileFromMap(rows.first);
+  }
+
+  Future<double> getRiderWalletBalance(String userEmail) async {
+    if (_useMemoryStore) {
+      return ((_riderProfilesMemory[userEmail]?['wallet_balance'] as num?) ?? 0).toDouble();
+    }
+
+    final db = await database;
+    final rows = await db.query(
+      tableRiderProfiles,
+      columns: ['wallet_balance'],
+      where: 'user_email = ?',
+      whereArgs: [userEmail],
+      limit: 1,
+    );
+    if (rows.isEmpty) return 0;
+    return ((rows.first['wallet_balance'] as num?) ?? 0).toDouble();
+  }
+
+  Future<void> updateRiderWalletBalance({required String userEmail, required double walletBalance}) async {
+    final clampedBalance = walletBalance < 0 ? 0.0 : walletBalance;
+    final nowIso = DateTime.now().toIso8601String();
+
+    if (_useMemoryStore) {
+      final existing = _riderProfilesMemory[userEmail] ?? {
+        'user_email': userEmail,
+        'aadhaar_number': '',
+        'operating_location': '',
+        'work_proof_type': 'Delivery ID',
+        'work_proof_id': '',
+        'upi_id': '',
+        'emergency_phone': '',
+        'payout_pin': '',
+        'enable_2fa': 0,
+        'consent_accepted': 0,
+        'is_verified': 0,
+      };
+
+      _riderProfilesMemory[userEmail] = {
+        ...existing,
+        'wallet_balance': clampedBalance,
+        'updated_at': nowIso,
+      };
+      return;
+    }
+
+    final db = await database;
+    final existing = await db.query(
+      tableRiderProfiles,
+      where: 'user_email = ?',
+      whereArgs: [userEmail],
+      limit: 1,
+    );
+
+    if (existing.isNotEmpty) {
+      await db.update(
+        tableRiderProfiles,
+        {
+          'wallet_balance': clampedBalance,
+          'updated_at': nowIso,
+        },
+        where: 'user_email = ?',
+        whereArgs: [userEmail],
+      );
+      return;
+    }
+
+    await db.insert(
+      tableRiderProfiles,
+      {
+        'user_email': userEmail,
+        'aadhaar_number': '',
+        'operating_location': '',
+        'work_proof_type': 'Delivery ID',
+        'work_proof_id': '',
+        'upi_id': '',
+        'emergency_phone': '',
+        'payout_pin': '',
+        'enable_2fa': 0,
+        'consent_accepted': 0,
+        'is_verified': 0,
+        'wallet_balance': clampedBalance,
+        'updated_at': nowIso,
+      },
+      conflictAlgorithm: sqflite.ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> saveApprovedAlert(RiskAlert alert) async {
+    final row = {
+      'id': alert.id,
+      'title': alert.title,
+      'trigger_description': alert.triggerDescription,
+      'source': alert.source,
+      'source_url': alert.sourceUrl,
+      'source_page_url': alert.sourcePageUrl,
+      'affected_location': alert.affectedLocation,
+      'severity': alert.severity.name,
+      'created_at': alert.createdAt.toIso8601String(),
+    };
+
+    if (_useMemoryStore) {
+      _alertsMemory[alert.id] = row;
+      return;
+    }
+
+    final db = await database;
+    await db.insert(tableAlerts, row, conflictAlgorithm: sqflite.ConflictAlgorithm.replace);
+  }
+
+  Future<List<RiskAlert>> getApprovedAlerts() async {
+    if (_useMemoryStore) {
+      final rows = _alertsMemory.values.toList()
+        ..sort((a, b) => DateTime.parse((b['created_at'] as String?) ?? DateTime.now().toIso8601String())
+            .compareTo(DateTime.parse((a['created_at'] as String?) ?? DateTime.now().toIso8601String())));
+      return rows.map(_alertFromMap).toList();
+    }
+
+    final db = await database;
+    final rows = await db.query(tableAlerts, orderBy: 'created_at DESC');
+    return rows.map(_alertFromMap).toList();
+  }
+
+  RiderSecurityProfile _profileFromMap(Map<String, Object?>? row) {
+    if (row == null) return const RiderSecurityProfile();
+    return RiderSecurityProfile(
+      aadhaarNumber: (row['aadhaar_number'] as String?) ?? '',
+      operatingLocation: (row['operating_location'] as String?) ?? '',
+      workProofType: (row['work_proof_type'] as String?) ?? 'Delivery ID',
+      workProofId: (row['work_proof_id'] as String?) ?? '',
+      upiId: (row['upi_id'] as String?) ?? '',
+      emergencyPhone: (row['emergency_phone'] as String?) ?? '',
+      payoutPin: (row['payout_pin'] as String?) ?? '',
+      enable2Fa: (row['enable_2fa'] as num?) == 1,
+      consentAccepted: (row['consent_accepted'] as num?) == 1,
+      isVerified: (row['is_verified'] as num?) == 1,
+    );
+  }
+
+  RiskAlert _alertFromMap(Map<String, Object?> row) {
+    final severityRaw = (row['severity'] as String?) ?? Severity.medium.name;
+    final severity = Severity.values.firstWhere((value) => value.name == severityRaw, orElse: () => Severity.medium);
+    return RiskAlert(
+      id: (row['id'] as String?) ?? '',
+      title: (row['title'] as String?) ?? '',
+      triggerDescription: (row['trigger_description'] as String?) ?? '',
+      source: (row['source'] as String?) ?? '',
+      sourceUrl: (row['source_url'] as String?) ?? '',
+      sourcePageUrl: (row['source_page_url'] as String?) ?? '',
+      affectedLocation: (row['affected_location'] as String?) ?? 'all',
+      severity: severity,
+      createdAt: DateTime.tryParse((row['created_at'] as String?) ?? '') ?? DateTime.now(),
+    );
+  }
+
+  Payout _payoutFromPersistedMap(Map<String, Object?> row, String userEmail) {
+    final persistedId = (row['id'] as String?) ?? '';
+    final prefix = '${userEmail}__';
+    final publicId = persistedId.startsWith(prefix) ? persistedId.substring(prefix.length) : persistedId;
+    return Payout(
+      id: publicId,
+      reason: (row['reason'] as String?) ?? '',
+      date: DateTime.tryParse((row['payout_date'] as String?) ?? '') ?? DateTime.now(),
+      amount: (row['amount'] as num?)?.toDouble() ?? 0,
+    );
   }
 }
 
@@ -1087,12 +1599,98 @@ String formatDate(DateTime date) {
   return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
 }
 
+const String allIndiaLocation = 'All India';
+
+const List<String> riderPriorityLocations = [
+  'Vijayawada',
+  'Bengaluru',
+  'Pune',
+  'Delhi',
+];
+
+const List<String> indiaStates29 = [
+  'Andhra Pradesh',
+  'Arunachal Pradesh',
+  'Assam',
+  'Bihar',
+  'Chhattisgarh',
+  'Goa',
+  'Gujarat',
+  'Haryana',
+  'Himachal Pradesh',
+  'Jammu and Kashmir',
+  'Jharkhand',
+  'Karnataka',
+  'Kerala',
+  'Madhya Pradesh',
+  'Maharashtra',
+  'Manipur',
+  'Meghalaya',
+  'Mizoram',
+  'Nagaland',
+  'Odisha',
+  'Punjab',
+  'Rajasthan',
+  'Sikkim',
+  'Tamil Nadu',
+  'Telangana',
+  'Tripura',
+  'Uttar Pradesh',
+  'Uttarakhand',
+  'West Bengal',
+];
+
+final List<String> riderLocationOptions = [
+  ...riderPriorityLocations,
+  ...indiaStates29,
+];
+
+final List<String> adminLocationOptions = [
+  allIndiaLocation,
+  ...riderLocationOptions,
+];
+
+final Map<String, String> _locationAliases = {
+  'all': 'all',
+  'all locations': 'all',
+  'any': 'all',
+  'pan india': 'all',
+  'nationwide': 'all',
+  'all india': 'all',
+  'india': 'all',
+  'bangalore': 'bengaluru',
+  'new delhi': 'delhi',
+  'nct delhi': 'delhi',
+  'kartanka': 'karnataka',
+  'hbangolre': 'bengaluru',
+};
+
+final Map<String, String> _cityToState = {
+  'vijayawada': 'andhra pradesh',
+  'bengaluru': 'karnataka',
+  'pune': 'maharashtra',
+  'delhi': 'delhi',
+};
+
+final Set<String> _normalizedRiderLocations = riderLocationOptions.map((location) => location.trim().toLowerCase()).toSet();
+final Map<String, String> _normalizedToDisplay = {
+  for (final location in adminLocationOptions) location.trim().toLowerCase(): location,
+};
+
+String _displayLocationFromValue(String value, {required bool allowAll}) {
+  final normalized = _normalizeLocation(value);
+  if (normalized.isEmpty) return '';
+  if (normalized == 'all') {
+    return allowAll ? allIndiaLocation : '';
+  }
+  return _normalizedToDisplay[normalized] ?? '';
+}
+
 String _normalizeLocation(String value) {
   final lowered = value.trim().toLowerCase();
   if (lowered.isEmpty) return '';
-  if (lowered == 'all' || lowered == 'all locations' || lowered == 'any' || lowered == 'pan india' || lowered == 'nationwide') {
-    return 'all';
-  }
+  if (_locationAliases.containsKey(lowered)) return _locationAliases[lowered]!;
+  if (_normalizedRiderLocations.contains(lowered)) return lowered;
   return lowered;
 }
 
@@ -1102,6 +1700,12 @@ bool isAlertRelevantForLocation(RiskAlert alert, String riderLocation) {
 
   final rider = _normalizeLocation(riderLocation);
   if (rider.isEmpty) return false;
+
+  if (rider == alertLocation) return true;
+
+  final riderState = _cityToState[rider] ?? rider;
+  final alertState = _cityToState[alertLocation] ?? alertLocation;
+  if (riderState == alertState) return true;
 
   return rider.contains(alertLocation) || alertLocation.contains(rider);
 }
@@ -1150,6 +1754,22 @@ String _searchUrl(String query) {
   return 'https://www.google.com/search?q=${Uri.encodeQueryComponent(query)}';
 }
 
+const String supportEmail = 'sriakshaya_kodali@srmap.edu.in';
+const String supportPhone = '+917569841054';
+const String supportWhatsApp = '+917569841054';
+
+Future<void> openSupportEmail(BuildContext context) async {
+  await openSourceLink(context, 'mailto:$supportEmail');
+}
+
+Future<void> openSupportPhone(BuildContext context) async {
+  await openSourceLink(context, 'tel:$supportPhone');
+}
+
+Future<void> openSupportWhatsApp(BuildContext context) async {
+  await openSourceLink(context, 'https://wa.me/${supportWhatsApp.replaceAll('+', '')}');
+}
+
 String bestCandidateSourcePageUrl(NewsTriggerCandidate candidate) {
   if (isOpenableUrl(candidate.sourcePageUrl)) return candidate.sourcePageUrl;
   if (isOpenableUrl(candidate.url)) return candidate.url;
@@ -1176,7 +1796,7 @@ Future<void> openSourceLink(BuildContext context, String sourceUrl) async {
   var normalized = sourceUrl.trim();
   if (normalized.isEmpty) return;
 
-  final hasScheme = RegExp(r'^https?://', caseSensitive: false).hasMatch(normalized);
+  final hasScheme = RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:').hasMatch(normalized);
   if (!hasScheme) {
     normalized = 'https://$normalized';
   }
@@ -1229,20 +1849,34 @@ class SurakshaRideApp extends StatefulWidget {
 
 class _SurakshaRideAppState extends State<SurakshaRideApp> {
   AuthUser? _user;
+  bool _showIntro = true;
   PlanId _selectedPlan = PlanId.s;
   late Future<void> _dbInitFuture;
   final List<NewsTriggerCandidate> _pendingNewsTriggers = [];
-  final List<RiskAlert> _approvedAlerts = [];
+  List<RiskAlert> _approvedAlerts = [];
   final List<FraudFlag> _fraudFlags = [];
   bool? _isFetchingNewsTriggers = false;
 
   @override
   void initState() {
     super.initState();
-    _dbInitFuture = AppDatabase.instance.init();
+    _dbInitFuture = _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    await AppDatabase.instance.init();
+    final approvedAlerts = await AppDatabase.instance.getApprovedAlerts();
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _approvedAlerts = approvedAlerts;
+      });
+    });
   }
 
   Future<AuthActionResult> _login({required String email, required String password, required UserRole role}) async {
+    await _dbInitFuture;
     final result = await AppDatabase.instance.loginUser(email: email, password: password, role: role);
     if (result.success) {
       setState(() => _user = AuthUser(email: email, role: role));
@@ -1251,6 +1885,7 @@ class _SurakshaRideAppState extends State<SurakshaRideApp> {
   }
 
   Future<AuthActionResult> _register({required String email, required String password, required UserRole role}) async {
+    await _dbInitFuture;
     final result = await AppDatabase.instance.registerUser(email: email, password: password, role: role);
     if (result.success) {
       setState(() => _user = AuthUser(email: email, role: role));
@@ -1279,7 +1914,7 @@ class _SurakshaRideAppState extends State<SurakshaRideApp> {
     });
   }
 
-  void _approveNewsTrigger(String triggerId, String affectedLocation) {
+  Future<void> _approveNewsTrigger(String triggerId, String affectedLocation) async {
     final index = _pendingNewsTriggers.indexWhere((e) => e.id == triggerId);
     if (index == -1) return;
     final candidate = _pendingNewsTriggers.removeAt(index);
@@ -1296,6 +1931,8 @@ class _SurakshaRideAppState extends State<SurakshaRideApp> {
       severity: candidate.severity,
       createdAt: DateTime.now(),
     );
+
+    await AppDatabase.instance.saveApprovedAlert(alert);
 
     setState(() {
       _approvedAlerts.insert(0, alert);
@@ -1355,54 +1992,35 @@ class _SurakshaRideAppState extends State<SurakshaRideApp> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(18))),
         ),
       ),
-        home: FutureBuilder<void>(
-          future: _dbInitFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return const Scaffold(body: Center(child: CircularProgressIndicator()));
-            }
-
-            if (snapshot.hasError) {
-              return Scaffold(
-                body: Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Text(
-                      'Failed to initialize database. Please restart the app.\n${snapshot.error}',
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
+      home: _user == null
+          ? (_showIntro
+              ? IntroPage(
+                  onContinue: () {
+                    setState(() => _showIntro = false);
+                  },
+                )
+              : LoginPage(onLogin: _login, onRegister: _register))
+          : _user!.role == UserRole.rider
+              ? RiderHome(
+                  user: _user!,
+                  planId: _selectedPlan,
+                  approvedAlerts: _approvedAlerts,
+                  onFraudFlagGenerated: _recordFraudFlag,
+                  onPlanChanged: (newPlan) => setState(() => _selectedPlan = newPlan),
+                  onSignOut: () => setState(() => _user = null),
+                )
+              : AdminHome(
+                  user: _user!,
+                  planIdHint: _selectedPlan,
+                  pendingNewsTriggers: _pendingNewsTriggers,
+                  approvedAlerts: _approvedAlerts,
+                  fraudFlags: _fraudFlags,
+                  isFetchingNewsTriggers: _isFetchingNewsTriggers ?? false,
+                  onFetchNewsTriggers: _fetchNewsTriggers,
+                  onApproveNewsTrigger: _approveNewsTrigger,
+                  onRejectNewsTrigger: _rejectNewsTrigger,
+                  onSignOut: () => setState(() => _user = null),
                 ),
-              );
-            }
-
-            if (_user == null) {
-              return LoginPage(onLogin: _login, onRegister: _register);
-            }
-
-            return _user!.role == UserRole.rider
-                ? RiderHome(
-                    user: _user!,
-                    planId: _selectedPlan,
-                    approvedAlerts: _approvedAlerts,
-                    onFraudFlagGenerated: _recordFraudFlag,
-                    onPlanChanged: (newPlan) => setState(() => _selectedPlan = newPlan),
-                    onSignOut: () => setState(() => _user = null),
-                  )
-                : AdminHome(
-                    user: _user!,
-                    planIdHint: _selectedPlan,
-                    pendingNewsTriggers: _pendingNewsTriggers,
-                    approvedAlerts: _approvedAlerts,
-                    fraudFlags: _fraudFlags,
-                    isFetchingNewsTriggers: _isFetchingNewsTriggers ?? false,
-                    onFetchNewsTriggers: _fetchNewsTriggers,
-                    onApproveNewsTrigger: _approveNewsTrigger,
-                    onRejectNewsTrigger: _rejectNewsTrigger,
-                    onSignOut: () => setState(() => _user = null),
-                  );
-          },
-        ),
     );
   }
 }
@@ -1418,8 +2036,8 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final _email = TextEditingController(text: 'rider@demo.com');
-  final _password = TextEditingController(text: 'demo123');
+  final _email = TextEditingController();
+  final _password = TextEditingController();
   final _confirmPassword = TextEditingController();
   bool _showPassword = false;
   bool _showConfirmPassword = false;
@@ -1498,25 +2116,21 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1120),
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final stack = constraints.maxWidth < 900;
-                  return Flex(
-                    direction: stack ? Axis.vertical : Axis.horizontal,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Expanded(child: _HeroPanel()),
-                      if (!stack) const SizedBox(width: 20),
-                      Expanded(child: _LoginCard()),
-                    ],
-                  );
-                },
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFFF3FBF8), Color(0xFFFFFFFF)],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: _LoginCard(),
               ),
             ),
           ),
@@ -1673,23 +2287,125 @@ class _LoginPageState extends State<LoginPage> {
                       : Text(_mode == AuthMode.login ? 'Login' : 'Register'),
                 ),
               ),
-              const SizedBox(height: 10),
-              OutlinedButton(
-                onPressed: () {
-                  setState(() {
-                    _email.text = _role == UserRole.rider ? 'rider@demo.com' : 'admin@demo.com';
-                    _password.text = 'demo123';
-                    _confirmPassword.text = 'demo123';
-                    _error = null;
-                    _success = null;
-                  });
-                },
-                child: Text(_mode == AuthMode.login ? 'Fill demo credentials' : 'Use demo-style values'),
-              ),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+class IntroPage extends StatelessWidget {
+  final VoidCallback onContinue;
+
+  const IntroPage({super.key, required this.onContinue});
+
+  @override
+  Widget build(BuildContext context) {
+    const introTitleColor = Color(0xFF0F172A);
+    const introBodyColor = Color(0xFF334155);
+
+    return Scaffold(
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFFEAF7F3), Color(0xFFF4FBFF), Color(0xFFFFF8EE)],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 900),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Card(
+                  color: Colors.white,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0xFF99F6E4).withOpacity(0.35)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF0F766E).withOpacity(0.08),
+                          blurRadius: 26,
+                          offset: const Offset(0, 14),
+                        ),
+                      ],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'SurakshaRide',
+                            style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: introTitleColor),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'Income protection built for delivery riders.',
+                            style: TextStyle(fontSize: 28, height: 1.2, fontWeight: FontWeight.w900, color: introTitleColor),
+                          ),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Auto-detects approved disruptions and supports zero-touch weekly payouts with fraud checks and location-aware protection.',
+                            style: TextStyle(color: introBodyColor, height: 1.45),
+                          ),
+                          const SizedBox(height: 20),
+                          Wrap(
+                            spacing: 10,
+                            runSpacing: 10,
+                            children: const [
+                              _IntroFeatureChip(icon: Icons.bolt_outlined, text: 'Auto triggers'),
+                              _IntroFeatureChip(icon: Icons.wallet_outlined, text: 'Weekly protection'),
+                              _IntroFeatureChip(icon: Icons.shield_outlined, text: 'Non-GPS fraud checks'),
+                            ],
+                          ),
+                          const SizedBox(height: 24),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: FilledButton.icon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF0F766E),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                              ),
+                              onPressed: onContinue,
+                              icon: const Icon(Icons.login_outlined),
+                              label: const Text('Go to Login'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _IntroFeatureChip extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _IntroFeatureChip({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Chip(
+      avatar: Icon(icon, size: 18, color: const Color(0xFF0F766E)),
+      label: Text(text),
+      labelStyle: const TextStyle(color: Color(0xFF0F172A), fontWeight: FontWeight.w600),
+      backgroundColor: const Color(0xFFE6FFFA),
+      side: BorderSide(color: const Color(0xFF2DD4BF).withOpacity(0.32)),
     );
   }
 }
@@ -1723,6 +2439,28 @@ class _HeroPanel extends StatelessWidget {
                     _HeroChip(icon: Icons.shield_outlined, text: 'Fraud scoring'),
                     _HeroChip(icon: Icons.wallet_outlined, text: 'Protection wallet'),
                   ],
+                ),
+                const SizedBox(height: 18),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white.withOpacity(0.16)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Why Riders Join', style: TextStyle(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 8),
+                      Text('No claim forms. Auto-detected trigger means auto-credit.', style: TextStyle(color: Colors.white.withOpacity(0.86))),
+                      const SizedBox(height: 4),
+                      Text('Hyper-local risk pricing for city/state zones.', style: TextStyle(color: Colors.white.withOpacity(0.86))),
+                      const SizedBox(height: 4),
+                      Text('Weekly flexible plans designed for gig cash flow.', style: TextStyle(color: Colors.white.withOpacity(0.86))),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -1776,26 +2514,81 @@ class RiderHome extends StatefulWidget {
 class _RiderHomeState extends State<RiderHome> {
   int _tabIndex = 0;
   late PlanId _selectedPlan;
-  double _walletBalance = 1200;
+  double _walletBalance = 0;
   late List<RiskAlert> _alerts;
-  final List<Payout> _payouts = [];
+  List<Payout> _payouts = [];
   final Set<String> _simulatedAlertIds = {};
   final Set<String> _autoProcessedAlertIds = {};
   final Set<String> _reviewRequiredAlertIds = {};
   late List<InsurancePolicy> _insurancePolicies;
   late SelectedInsurance? _selectedInsurance;
   RiderSecurityProfile _securityProfile = const RiderSecurityProfile();
+  int _locationChanges7d = 0;
+  int _locationDistinct30d = 0;
+  int? _hoursSinceLastLocationChange;
 
   @override
   void initState() {
     super.initState();
     _selectedPlan = widget.planId;
     _alerts = const <RiskAlert>[];
+    _loadSecurityProfile();
     _refreshLocationFilteredAlerts();
     _autoProcessAlertsIfEligible();
     _insurancePolicies = _buildInsurancePolicies();
     _selectedInsurance = null;
+    _loadWalletBalance();
+    _loadPersistedPayouts();
     _loadPersistedInsuranceSelection();
+  }
+
+  Future<void> _loadWalletBalance() async {
+    final balance = await AppDatabase.instance.getRiderWalletBalance(widget.user.email);
+    if (!mounted) return;
+    setState(() {
+      _walletBalance = balance;
+    });
+  }
+
+  Future<void> _loadSecurityProfile() async {
+    final profile = await AppDatabase.instance.getRiderSecurityProfile(widget.user.email);
+    if (!mounted) return;
+    setState(() {
+      _securityProfile = profile;
+    });
+    _refreshLocationIntegritySignals();
+    _refreshLocationFilteredAlerts();
+    _autoProcessAlertsIfEligible();
+  }
+
+  Future<void> _refreshLocationIntegritySignals() async {
+    final signals = await AppDatabase.instance.getRiderLocationIntegritySignals(widget.user.email);
+    if (!mounted) return;
+    setState(() {
+      _locationChanges7d = signals.changes7d;
+      _locationDistinct30d = signals.distinct30d;
+      _hoursSinceLastLocationChange = signals.hoursSinceLastChange;
+    });
+  }
+
+  Future<void> _loadPersistedPayouts() async {
+    final payouts = await AppDatabase.instance.getPayoutsForUser(widget.user.email);
+    if (!mounted) return;
+
+    final loadedAutoAlertIds = <String>{};
+    for (final payout in payouts) {
+      if (payout.id.startsWith('ap_')) {
+        loadedAutoAlertIds.add(payout.id.substring(3));
+      }
+    }
+
+    setState(() {
+      _payouts = payouts;
+      _simulatedAlertIds.addAll(loadedAutoAlertIds);
+      _autoProcessedAlertIds.addAll(loadedAutoAlertIds);
+    });
+
+    _autoProcessAlertsIfEligible();
   }
 
   @override
@@ -1854,16 +2647,26 @@ class _RiderHomeState extends State<RiderHome> {
 
       _autoProcessedAlertIds.add(alert.id);
       _simulatedAlertIds.add(alert.id);
-      _walletBalance += amount;
+      final walletCredit = _walletPortionForAutoPayout(amount);
+      final bankCredit = amount - walletCredit;
+      _walletBalance += walletCredit;
+      AppDatabase.instance.updateRiderWalletBalance(
+        userEmail: widget.user.email,
+        walletBalance: _walletBalance,
+      );
+      final payout = Payout(
+        id: 'ap_${alert.id}',
+        reason: bankCredit > 0
+            ? 'Auto payout: ${alert.title} (Bank ${inrAmt(bankCredit)} + Wallet ${inrAmt(walletCredit)})'
+            : 'Auto payout: ${alert.title} (Wallet ${inrAmt(walletCredit)})',
+        date: DateTime.now(),
+        amount: amount,
+      );
       _payouts.insert(
         0,
-        Payout(
-          id: 'ap_${alert.id}',
-          reason: 'Auto payout: ${alert.title}',
-          date: DateTime.now(),
-          amount: amount,
-        ),
+        payout,
       );
+      AppDatabase.instance.saveAutoPayout(userEmail: widget.user.email, payout: payout);
       changed = true;
     }
 
@@ -1872,14 +2675,30 @@ class _RiderHomeState extends State<RiderHome> {
     }
   }
 
+  double _walletPortionForAutoPayout(double totalAmount) {
+    if (_securityProfile.upiId.trim().isEmpty) {
+      return totalAmount;
+    }
+    return totalAmount * 0.2;
+  }
+
   ({double score, List<String> reasons}) _assessFraudRisk({
     required RiskAlert alert,
     required double payoutAmount,
   }) {
-    var score = 0.08;
+    var score = 0.06;
     final reasons = <String>[];
     final now = DateTime.now();
-    final recentPayouts = _payouts.where((p) => now.difference(p.date) <= const Duration(hours: 24)).length;
+    final recentPayouts24h = _payouts.where((p) => now.difference(p.date) <= const Duration(hours: 24)).toList();
+    final recentPayouts7d = _payouts.where((p) => now.difference(p.date) <= const Duration(days: 7)).toList();
+    final recentAmount7d = recentPayouts7d.fold<double>(0, (sum, payout) => sum + payout.amount);
+    final cap = _selectedPlan.weeklyCoverage.toDouble();
+    final concentrationRatio = cap <= 0 ? 0.0 : payoutAmount / cap;
+
+    if (!_securityProfile.isVerified) {
+      score += 0.28;
+      reasons.add('Rider profile not fully verified');
+    }
 
     if (_securityProfile.operatingLocation.trim().isEmpty) {
       score += 0.30;
@@ -1893,20 +2712,78 @@ class _RiderHomeState extends State<RiderHome> {
       score += 0.10;
       reasons.add('Weak work-proof identifier');
     }
+    if (_securityProfile.upiId.trim().isEmpty) {
+      score += 0.12;
+      reasons.add('Missing payout UPI identifier');
+    }
+    if (_securityProfile.emergencyPhone.trim().length != 10) {
+      score += 0.10;
+      reasons.add('Invalid emergency contact profile');
+    }
+    if (_locationChanges7d >= 2) {
+      score += 0.22;
+      reasons.add('Frequent operating-location changes in last 7 days');
+    }
+    if (_locationDistinct30d >= 3) {
+      score += 0.18;
+      reasons.add('Multiple distinct operating locations in last 30 days');
+    }
+    if ((_hoursSinceLastLocationChange ?? 9999) < 24) {
+      score += 0.16;
+      reasons.add('Recent location change before claim processing');
+    }
+
+    final selectedInsurance = _selectedInsurance;
+    if (selectedInsurance == null) {
+      score += 0.35;
+      reasons.add('No active policy context for payout');
+    } else {
+      if (selectedInsurance.paymentDate == null) {
+        score += 0.30;
+        reasons.add('Policy payment is not completed');
+      } else {
+        final hoursSincePayment = now.difference(selectedInsurance.paymentDate!).inHours;
+        if (hoursSincePayment < 2) {
+          score += 0.16;
+          reasons.add('Claim shortly after payment activation');
+        }
+      }
+
+      final hoursSincePolicyStart = now.difference(selectedInsurance.startDate).inHours;
+      if (hoursSincePolicyStart < 6) {
+        score += 0.12;
+        reasons.add('Very recent policy start with immediate claim');
+      }
+    }
+
     if (alert.affectedLocation.trim().toLowerCase() == 'all') {
       score += 0.18;
       reasons.add('Broad geofence trigger (all locations)');
     }
-    if (recentPayouts >= 2) {
+    if (recentPayouts24h.length >= 2) {
       score += 0.24;
       reasons.add('Multiple payouts within 24h window');
     }
-    if (payoutAmount > (_selectedPlan.weeklyCoverage * 0.70)) {
+    if (recentPayouts7d.length >= 5) {
+      score += 0.18;
+      reasons.add('High payout frequency within 7 days');
+    }
+    if (recentAmount7d > (cap * 1.8)) {
+      score += 0.16;
+      reasons.add('Unusually high payout amount over 7 days');
+    }
+    if (concentrationRatio > 0.75) {
       score += 0.20;
       reasons.add('High payout amount near weekly cap');
     }
+    if (alert.source.trim().isEmpty) {
+      score += 0.10;
+      reasons.add('Low-confidence trigger source metadata');
+    }
 
-    return (score: score.clamp(0.0, 1.0), reasons: reasons.isEmpty ? const ['No anomaly signals'] : reasons);
+    reasons.add('Assessment mode: non-GPS behavioral rules');
+
+    return (score: score.clamp(0.0, 1.0), reasons: reasons.isEmpty ? const ['No non-GPS anomaly signals'] : reasons);
   }
 
   List<InsurancePolicy> _buildInsurancePolicies() {
@@ -1950,9 +2827,50 @@ class _RiderHomeState extends State<RiderHome> {
     ];
   }
 
+  String _policyIdForPlan(PlanId plan) {
+    return switch (plan) {
+      PlanId.s => 'policy_basic',
+      PlanId.m => 'policy_premium',
+      PlanId.l => 'policy_comprehensive',
+    };
+  }
+
+  InsurancePolicy? _policyForPlan(PlanId plan) {
+    final policyId = _policyIdForPlan(plan);
+    return _insurancePolicies.where((p) => p.id == policyId).cast<InsurancePolicy?>().firstWhere((p) => p != null, orElse: () => null);
+  }
+
+  Future<void> _syncInsuranceSelectionWithPlan({bool persist = false}) async {
+    final policy = _policyForPlan(_selectedPlan);
+    if (policy == null) return;
+
+    final alreadySame = _selectedInsurance?.policy.id == policy.id;
+    if (alreadySame) return;
+
+    final selected = SelectedInsurance(policy: policy, startDate: DateTime.now());
+    if (mounted) {
+      setState(() {
+        _selectedInsurance = selected;
+      });
+    }
+
+    if (persist) {
+      await AppDatabase.instance.createOrReplaceSelectedPolicy(
+        userEmail: widget.user.email,
+        policyId: policy.id,
+        startDate: selected.startDate,
+      );
+    }
+  }
+
   Future<void> _loadPersistedInsuranceSelection() async {
     final selectedMap = await AppDatabase.instance.getLatestSelectedPolicy(widget.user.email);
-    if (!mounted || selectedMap == null) return;
+    if (!mounted) return;
+
+    if (selectedMap == null) {
+      await _syncInsuranceSelectionWithPlan(persist: true);
+      return;
+    }
 
     final policyId = selectedMap['policy_id'] as String;
     final policy = _insurancePolicies.where((p) => p.id == policyId).cast<InsurancePolicy?>().firstWhere((p) => p != null, orElse: () => null);
@@ -1986,6 +2904,12 @@ class _RiderHomeState extends State<RiderHome> {
     );
   }
 
+  Future<void> _handlePlanSelection(PlanId plan) async {
+    setState(() => _selectedPlan = plan);
+    widget.onPlanChanged(plan);
+    await _syncInsuranceSelectionWithPlan(persist: true);
+  }
+
   Future<void> _handlePaymentSuccess({
     required double totalAmount,
     required double gstAmount,
@@ -2006,7 +2930,12 @@ class _RiderHomeState extends State<RiderHome> {
     if (!mounted) return;
 
     setState(() {
-      _walletBalance -= totalAmount;
+      if (paymentMethod == 'wallet') {
+        _walletBalance -= totalAmount;
+        if (_walletBalance < 0) {
+          _walletBalance = 0;
+        }
+      }
       _selectedInsurance = SelectedInsurance(
         policy: selected.policy,
         startDate: selected.startDate,
@@ -2016,15 +2945,29 @@ class _RiderHomeState extends State<RiderHome> {
       _tabIndex = 0;
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Insurance activated successfully! Amount: ${inrAmt(totalAmount)}')),
+    await AppDatabase.instance.updateRiderWalletBalance(
+      userEmail: widget.user.email,
+      walletBalance: _walletBalance,
     );
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Insurance activated successfully via ${paymentMethod.toUpperCase()}! Amount: ${inrAmt(totalAmount)}',
+        ),
+      ),
+    );
+
+    _loadPersistedInsuranceSelection();
   }
 
   void _saveSecurityProfile(RiderSecurityProfile profile) {
     setState(() {
       _securityProfile = profile;
       _refreshLocationFilteredAlerts();
+    });
+    AppDatabase.instance.saveRiderSecurityProfile(userEmail: widget.user.email, profile: profile).then((_) {
+      _refreshLocationIntegritySignals();
     });
     _autoProcessAlertsIfEligible();
     ScaffoldMessenger.of(context).showSnackBar(
@@ -2050,10 +2993,7 @@ class _RiderHomeState extends State<RiderHome> {
       RiderWalletPage(planId: _selectedPlan, walletBalance: _walletBalance, payouts: _payouts, onGoToPlans: () => setState(() => _tabIndex = 2)),
       RiderCoveragePage(
         planId: _selectedPlan,
-        onPlanSelected: (plan) {
-          setState(() => _selectedPlan = plan);
-          widget.onPlanChanged(plan);
-        },
+        onPlanSelected: _handlePlanSelection,
         policies: _insurancePolicies,
         selectedInsurance: _selectedInsurance,
         onPolicySelected: _handlePolicySelection,
@@ -2168,6 +3108,13 @@ class RiderDashboardPage extends StatelessWidget {
                 Text(
                   'Weekly AI-driven income protection overview',
                   style: TextStyle(color: Colors.black.withOpacity(0.62)),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  securityProfile.operatingLocation.trim().isEmpty
+                      ? 'Set your operating location to receive area-specific alerts.'
+                      : 'Operating location: ${securityProfile.operatingLocation}',
+                  style: TextStyle(color: Colors.black.withOpacity(0.62), fontSize: 12, fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 12),
                 Wrap(
@@ -2349,6 +3296,50 @@ class RiderDashboardPage extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 16),
+        Card(
+          color: const Color(0xFF0B1020),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: DefaultTextStyle(
+              style: const TextStyle(color: Colors.white),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Need Help?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 6),
+                  Text('If you face any issue with payment, policy activation, location mapping, or payouts, contact us directly.', style: TextStyle(color: Colors.white.withOpacity(0.82))),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () => openSupportEmail(context),
+                        icon: const Icon(Icons.email_outlined),
+                        label: const Text('Email Support'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => openSupportWhatsApp(context),
+                        icon: const Icon(Icons.chat_outlined),
+                        label: const Text('WhatsApp'),
+                        style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white54)),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => openSupportPhone(context),
+                        icon: const Icon(Icons.call_outlined),
+                        label: const Text('Call Us'),
+                        style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white54)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text('Email: $supportEmail • Phone: $supportPhone', style: TextStyle(color: Colors.white.withOpacity(0.72), fontSize: 12)),
+                ],
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -2436,7 +3427,7 @@ class RiderKycSecurityCard extends StatefulWidget {
 
 class _RiderKycSecurityCardState extends State<RiderKycSecurityCard> {
   late final TextEditingController _aadhaar;
-  TextEditingController? _operatingLocation;
+  late String _operatingLocation;
   late final TextEditingController _workProofId;
   late final TextEditingController _upiId;
   late final TextEditingController _emergencyPhone;
@@ -2446,15 +3437,25 @@ class _RiderKycSecurityCardState extends State<RiderKycSecurityCard> {
   late bool _consentAccepted;
   String? _error;
 
-  TextEditingController get _operatingLocationCtrl {
-    return _operatingLocation ??= TextEditingController(text: widget.initialProfile.operatingLocation);
+  void _applyProfileToControllers(RiderSecurityProfile profile) {
+    _aadhaar.text = profile.aadhaarNumber;
+    final savedLocation = _displayLocationFromValue(profile.operatingLocation, allowAll: false);
+    _operatingLocation = savedLocation.isEmpty ? riderLocationOptions.first : savedLocation;
+    _workProofId.text = profile.workProofId;
+    _upiId.text = profile.upiId;
+    _emergencyPhone.text = profile.emergencyPhone;
+    _payoutPin.text = profile.payoutPin;
+    _workProofType = profile.workProofType;
+    _enable2Fa = profile.enable2Fa;
+    _consentAccepted = profile.consentAccepted;
   }
 
   @override
   void initState() {
     super.initState();
     _aadhaar = TextEditingController(text: widget.initialProfile.aadhaarNumber);
-    _operatingLocation = TextEditingController(text: widget.initialProfile.operatingLocation);
+    final savedLocation = _displayLocationFromValue(widget.initialProfile.operatingLocation, allowAll: false);
+    _operatingLocation = savedLocation.isEmpty ? riderLocationOptions.first : savedLocation;
     _workProofId = TextEditingController(text: widget.initialProfile.workProofId);
     _upiId = TextEditingController(text: widget.initialProfile.upiId);
     _emergencyPhone = TextEditingController(text: widget.initialProfile.emergencyPhone);
@@ -2465,9 +3466,29 @@ class _RiderKycSecurityCardState extends State<RiderKycSecurityCard> {
   }
 
   @override
+  void didUpdateWidget(covariant RiderKycSecurityCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldProfile = oldWidget.initialProfile;
+    final newProfile = widget.initialProfile;
+    final changed = oldProfile.aadhaarNumber != newProfile.aadhaarNumber ||
+        oldProfile.operatingLocation != newProfile.operatingLocation ||
+        oldProfile.workProofType != newProfile.workProofType ||
+        oldProfile.workProofId != newProfile.workProofId ||
+        oldProfile.upiId != newProfile.upiId ||
+        oldProfile.emergencyPhone != newProfile.emergencyPhone ||
+        oldProfile.payoutPin != newProfile.payoutPin ||
+        oldProfile.enable2Fa != newProfile.enable2Fa ||
+        oldProfile.consentAccepted != newProfile.consentAccepted;
+
+    if (changed) {
+      _applyProfileToControllers(newProfile);
+      _error = null;
+    }
+  }
+
+  @override
   void dispose() {
     _aadhaar.dispose();
-    _operatingLocation?.dispose();
     _workProofId.dispose();
     _upiId.dispose();
     _emergencyPhone.dispose();
@@ -2477,7 +3498,7 @@ class _RiderKycSecurityCardState extends State<RiderKycSecurityCard> {
 
   void _save() {
     final aadhaar = _aadhaar.text.trim();
-    final operatingLocation = _operatingLocationCtrl.text.trim();
+    final operatingLocation = _operatingLocation.trim();
     final workProofId = _workProofId.text.trim();
     final upi = _upiId.text.trim();
     final emergencyPhone = _emergencyPhone.text.trim();
@@ -2492,8 +3513,8 @@ class _RiderKycSecurityCardState extends State<RiderKycSecurityCard> {
       setState(() => _error = 'Aadhaar must be exactly 12 digits.');
       return;
     }
-    if (operatingLocation.length < 2) {
-      setState(() => _error = 'Please enter your operating location (city/zone).');
+    if (operatingLocation.isEmpty) {
+      setState(() => _error = 'Please select your operating location.');
       return;
     }
     if (workProofId.isEmpty) {
@@ -2575,15 +3596,18 @@ class _RiderKycSecurityCardState extends State<RiderKycSecurityCard> {
               ),
             ),
             const SizedBox(height: 10),
-            TextField(
-              controller: _operatingLocationCtrl,
-              textCapitalization: TextCapitalization.words,
+            DropdownButtonFormField<String>(
+              value: _operatingLocation,
+              menuMaxHeight: 360,
               decoration: const InputDecoration(
                 labelText: 'Operating Location',
-                hintText: 'City / Area where you ride',
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.location_on_outlined),
               ),
+              items: riderLocationOptions
+                  .map((location) => DropdownMenuItem<String>(value: location, child: Text(location)))
+                  .toList(),
+              onChanged: (value) => setState(() => _operatingLocation = value ?? riderLocationOptions.first),
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
@@ -2731,7 +3755,7 @@ class RiderWalletPage extends StatelessWidget {
                 const Text('Payout history', style: TextStyle(fontWeight: FontWeight.w900)),
                 const SizedBox(height: 8),
                 if (payouts.isEmpty)
-                  const Text('No payouts yet. Open Alerts and simulate a trigger.')
+                  const Text('No payouts yet. When admin validates a disruption for your location, payout is auto-credited.')
                 else
                   ...payouts.map((payout) => Padding(
                         padding: const EdgeInsets.symmetric(vertical: 6),
@@ -2884,9 +3908,9 @@ class RiderAlertsPage extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        const Text('Payout Status Alerts', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const Text('Zero-Touch Claim Status', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
         const SizedBox(height: 8),
-        Text('Your account is monitored for validated payout conditions.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+        Text('No claim submission is needed. Approved triggers for your location are auto-processed and credited.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
         const SizedBox(height: 12),
         if (alerts.isNotEmpty)
           _LossSimulatorCard(planId: planId, alerts: alerts)
@@ -2979,17 +4003,20 @@ class _LossSimulatorCard extends StatefulWidget {
 }
 
 class _LossSimulatorCardState extends State<_LossSimulatorCard> {
+  late final TextEditingController _expectedDaily;
   late final TextEditingController _actual;
   int _selectedIndex = 0;
 
   @override
   void initState() {
     super.initState();
+    _expectedDaily = TextEditingController(text: '800');
     _actual = TextEditingController(text: '300');
   }
 
   @override
   void dispose() {
+    _expectedDaily.dispose();
     _actual.dispose();
     super.dispose();
   }
@@ -2997,9 +4024,11 @@ class _LossSimulatorCardState extends State<_LossSimulatorCard> {
   @override
   Widget build(BuildContext context) {
     final alert = widget.alerts[_selectedIndex];
-    final expected = widget.planId.weeklyCoverage * (0.54 + _severityToRisk(alert.severity) * 0.18);
-    final actual = double.tryParse(_actual.text) ?? 0;
-    final loss = max(0.0, expected - actual);
+    final expectedDaily = double.tryParse(_expectedDaily.text) ?? 0;
+    final actualDaily = double.tryParse(_actual.text) ?? 0;
+    final expectedWeekly = max(0.0, expectedDaily) * 7;
+    final actualWeekly = max(0.0, actualDaily) * 7;
+    final loss = max(0.0, expectedWeekly - actualWeekly);
     final payout = min(widget.planId.weeklyCoverage.toDouble(), loss);
 
     return Card(
@@ -3008,9 +4037,9 @@ class _LossSimulatorCardState extends State<_LossSimulatorCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Payout estimator', style: TextStyle(fontWeight: FontWeight.w900)),
+            const Text('Income Loss Preview', style: TextStyle(fontWeight: FontWeight.w900)),
             const SizedBox(height: 8),
-            Text('Estimate possible payout using your current earnings input.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
+            Text('Set your expected and actual daily average earnings. Weekly payout is calculated from daily drop and then capped by your selected plan.', style: TextStyle(color: Colors.black.withOpacity(0.65))),
             const SizedBox(height: 12),
             DropdownButtonFormField<int>(
               value: _selectedIndex,
@@ -3020,9 +4049,16 @@ class _LossSimulatorCardState extends State<_LossSimulatorCard> {
             ),
             const SizedBox(height: 12),
             TextField(
+              controller: _expectedDaily,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Expected daily average earnings (₹)'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            TextField(
               controller: _actual,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Actual earnings (₹)'),
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Actual daily average earnings (₹)'),
               onChanged: (_) => setState(() {}),
             ),
             const SizedBox(height: 12),
@@ -3030,8 +4066,8 @@ class _LossSimulatorCardState extends State<_LossSimulatorCard> {
               spacing: 12,
               runSpacing: 12,
               children: [
-                _metric('Expected', inrAmt(expected), widget.planId.accent),
-                _metric('Actual', inrAmt(actual), widget.planId.accent),
+                _metric('Expected / week', inrAmt(expectedWeekly), widget.planId.accent),
+                _metric('Actual / week', inrAmt(actualWeekly), widget.planId.accent),
                 _metric('Loss / payout', '${inrAmt(loss)} / ${inrAmt(payout)}', widget.planId.accent),
               ],
             ),
@@ -3151,7 +4187,7 @@ class AdminHome extends StatelessWidget {
   final List<FraudFlag>? fraudFlags;
   final bool? isFetchingNewsTriggers;
   final Future<void> Function() onFetchNewsTriggers;
-  final void Function(String triggerId, String affectedLocation) onApproveNewsTrigger;
+  final Future<void> Function(String triggerId, String affectedLocation) onApproveNewsTrigger;
   final ValueChanged<String> onRejectNewsTrigger;
 
   const AdminHome({
@@ -3280,7 +4316,7 @@ class _AdminNewsTriggerQueueCard extends StatelessWidget {
   final List<NewsTriggerCandidate> pendingNewsTriggers;
   final bool? isFetching;
   final Future<void> Function() onFetch;
-  final void Function(String triggerId, String affectedLocation) onApprove;
+  final Future<void> Function(String triggerId, String affectedLocation) onApprove;
   final ValueChanged<String> onReject;
 
   const _AdminNewsTriggerQueueCard({
@@ -3303,42 +4339,55 @@ class _AdminNewsTriggerQueueCard extends StatelessWidget {
   }
 
   Future<String?> _promptAffectedLocation(BuildContext context, NewsTriggerCandidate candidate) async {
-    final locationController = TextEditingController(text: candidate.suggestedLocation == 'all' ? '' : candidate.suggestedLocation);
+    var selectedLocation = _displayLocationFromValue(candidate.suggestedLocation, allowAll: true);
+    if (selectedLocation.isEmpty) {
+      selectedLocation = allIndiaLocation;
+    }
     final selected = await showDialog<String>(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Affected location'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Enter the area where riders are actually affected. Leave blank to target all locations.'),
-              const SizedBox(height: 12),
-              TextField(
-                controller: locationController,
-                decoration: const InputDecoration(
-                  labelText: 'City / Area / Zone',
-                  hintText: 'Example: Bengaluru, Koramangala',
-                  border: OutlineInputBorder(),
-                ),
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Affected location'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Choose where this trigger is applicable. Only riders in matching city/state will receive it.'),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: selectedLocation,
+                    menuMaxHeight: 360,
+                    decoration: const InputDecoration(
+                      labelText: 'Location scope',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: adminLocationOptions
+                        .map((location) => DropdownMenuItem<String>(value: location, child: Text(location)))
+                        .toList(),
+                    onChanged: (value) {
+                      setDialogState(() {
+                        selectedLocation = value ?? allIndiaLocation;
+                      });
+                    },
+                  ),
+                ],
               ),
-            ],
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(dialogContext).pop(null), child: const Text('Cancel')),
-            FilledButton(
-              onPressed: () {
-                final value = locationController.text.trim();
-                Navigator.of(dialogContext).pop(value.isEmpty ? 'all' : value);
-              },
-              child: const Text('Approve'),
-            ),
-          ],
+              actions: [
+                TextButton(onPressed: () => Navigator.of(dialogContext).pop(null), child: const Text('Cancel')),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop(selectedLocation == allIndiaLocation ? 'all' : selectedLocation);
+                  },
+                  child: const Text('Approve'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
-    locationController.dispose();
     return selected;
   }
 
@@ -3395,7 +4444,12 @@ class _AdminNewsTriggerQueueCard extends StatelessWidget {
                             Text(candidate.summary, maxLines: 2, overflow: TextOverflow.ellipsis),
                             const SizedBox(height: 4),
                             Text('Source: ${candidate.source} • ${formatDate(candidate.publishedAt)}', style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
-                            Text('Suggested impact location: ${candidate.suggestedLocation}', style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12)),
+                            Text(
+                              candidate.category == TriggerCategory.appDowntime
+                                  ? 'Impact location: All India (service outage applies to all riders)'
+                                  : 'Suggested impact location: ${candidate.suggestedLocation}',
+                              style: TextStyle(color: Colors.black.withOpacity(0.6), fontSize: 12),
+                            ),
                             TextButton.icon(
                               onPressed: () => openSourceLink(context, bestCandidateSourcePageUrl(candidate)),
                               icon: const Icon(Icons.link, size: 16),
@@ -3419,9 +4473,11 @@ class _AdminNewsTriggerQueueCard extends StatelessWidget {
                                 const SizedBox(width: 8),
                                 FilledButton.icon(
                                   onPressed: () async {
-                                    final affectedLocation = await _promptAffectedLocation(context, candidate);
+                                    final affectedLocation = candidate.category == TriggerCategory.appDowntime
+                                        ? 'all'
+                                        : await _promptAffectedLocation(context, candidate);
                                     if (affectedLocation == null) return;
-                                    onApprove(candidate.id, affectedLocation);
+                                    await onApprove(candidate.id, affectedLocation);
                                   },
                                   icon: const Icon(Icons.check),
                                   label: const Text('Approve for riders'),
@@ -3473,7 +4529,7 @@ class _FraudFlagsCard extends StatelessWidget {
             Text('Total flags: ${sorted.length} • Critical: $critical • Medium: $medium', style: const TextStyle(fontWeight: FontWeight.w800)),
             const SizedBox(height: 8),
             if (sorted.isEmpty)
-              Text('No fraud anomalies flagged yet. Auto payouts are running with current risk checks.', style: TextStyle(color: Colors.black.withOpacity(0.65)))
+              Text('No fraud anomalies flagged yet. Auto payouts are running with non-GPS behavioral risk checks.', style: TextStyle(color: Colors.black.withOpacity(0.65)))
             else
               ...sorted.take(8).map(
                 (flag) => Padding(
@@ -3504,14 +4560,20 @@ class _TriggerFeedCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final totalApproved = alerts.length;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: alerts.isEmpty
-              ? const [Text('No approved triggers yet. Approve items from the news queue above to send them to riders.')]
-              : alerts
+          children: [
+            Text('Total approved triggers: $totalApproved', style: const TextStyle(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            Text('Historical approvals are shown below (latest first).', style: TextStyle(color: Colors.black.withOpacity(0.65), fontSize: 12)),
+            const SizedBox(height: 10),
+            ...(alerts.isEmpty
+                ? const [Text('No approved triggers yet. Approve items from the news queue above to send them to riders.')]
+                : alerts
                     .map(
                       (alert) => Padding(
                         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -3522,6 +4584,11 @@ class _TriggerFeedCard extends StatelessWidget {
                             const SizedBox(height: 4),
                             Text(alert.triggerDescription),
                             const SizedBox(height: 4),
+                            Text(
+                              'Affected location: ${alert.affectedLocation.trim().isEmpty ? 'all' : alert.affectedLocation}',
+                              style: TextStyle(color: Colors.black.withOpacity(0.65), fontSize: 12, fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(height: 2),
                             Text(
                               alertTriggerSource(alert),
                               style: TextStyle(color: Colors.black.withOpacity(0.65), fontSize: 12),
@@ -3546,7 +4613,8 @@ class _TriggerFeedCard extends StatelessWidget {
                         ),
                       ),
                     )
-                    .toList(),
+                    .toList()),
+          ],
         ),
       ),
     );
@@ -3782,6 +4850,7 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
   @override
   Widget build(BuildContext context) {
     final policy = widget.selectedInsurance?.policy;
+    final isAlreadyPaid = widget.selectedInsurance?.paymentDate != null;
 
     if (policy == null) {
       return Center(
@@ -3843,6 +4912,26 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
           ),
         ),
         const SizedBox(height: 16),
+        if (isAlreadyPaid)
+          Card(
+            color: Colors.green.withOpacity(0.10),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle_outline, color: Colors.green),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'This policy is already paid and active. Paid on ${formatDate(widget.selectedInsurance!.paymentDate!)}.',
+                      style: const TextStyle(color: Colors.green, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (isAlreadyPaid) const SizedBox(height: 16),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -3963,7 +5052,7 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
         ),
         const SizedBox(height: 16),
         FilledButton(
-          onPressed: (!_agreedToTerms || (_selectedPaymentMethod == 'wallet' && !canPay) || _isProcessing)
+          onPressed: (isAlreadyPaid || !_agreedToTerms || (_selectedPaymentMethod == 'wallet' && !canPay) || _isProcessing)
               ? null
               : () => _processPayment(totalAmount, policyColor),
           style: FilledButton.styleFrom(
@@ -3979,7 +5068,7 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
                     Text('Processing...'),
                   ],
                 )
-              : Text('Complete Payment - ${inrAmt(totalAmount)}'),
+              : Text(isAlreadyPaid ? 'Policy Already Active' : 'Complete Payment - ${inrAmt(totalAmount)}'),
         ),
         const SizedBox(height: 12),
         OutlinedButton(
@@ -3991,25 +5080,32 @@ class _InsurancePaymentPageState extends State<InsurancePaymentPage> {
     );
   }
 
-  void _processPayment(double amount, Color color) {
+  Future<void> _processPayment(double amount, Color color) async {
     final policy = widget.selectedInsurance?.policy;
     if (policy == null) return;
     final gstAmount = policy.weeklyPremium * 0.18;
 
     setState(() => _isProcessing = true);
 
-    Future.delayed(const Duration(seconds: 2), () async {
-      if (mounted) {
+    try {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      if (!mounted) return;
+
         await widget.onPaymentSuccess(
           totalAmount: amount,
           gstAmount: gstAmount,
           paymentMethod: _selectedPaymentMethod,
         );
-        if (mounted) {
-          setState(() => _isProcessing = false);
-        }
-      }
-    });
+
+      if (!mounted) return;
+      setState(() => _isProcessing = false);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isProcessing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Payment failed. Please try again.')),
+      );
+    }
   }
 
   Widget _priceRow(String label, String amount, Color color, {bool isGray = false, bool isBold = false}) {

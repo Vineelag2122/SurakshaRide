@@ -13,6 +13,10 @@ app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
+app.get('/', (req, res) => {
+  res.send('Server is running successfully 🚀');
+});
+
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'suraksharide-backend' });
 });
